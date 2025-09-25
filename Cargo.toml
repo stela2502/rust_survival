@@ -1,0 +1,12 @@
+[package]
+name = "rust_survival"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.3", features = ["derive"] }
+csv = "1.2"
+ndarray = { version = "0.15", features = ["blas"] }
+rand = "0.8"
+ndarray-linalg = { version = "0.16", features = ["openblas"] }
+openblas-src = "0.10.13"

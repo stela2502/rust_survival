@@ -4,6 +4,7 @@ use ndarray::Array2;
 use rand::seq::SliceRandom;
 use rand::{SeedableRng, rngs::StdRng};
 use std::collections::HashMap;
+use rand::prelude::IndexedRandom;
 
 /// Node of the survival tree
 #[derive(Debug)]
@@ -81,8 +82,10 @@ fn build_tree(
     // Sample features randomly
     let feature_indices: Vec<usize> = (0..n_features).collect();
     let sampled_features: Vec<usize> = feature_indices
+        //.iter()                  // convert to iterator
         .choose_multiple(rng, max_features)
-        .cloned()
+        .into_iter()
+        .cloned()               // get Vec<usize> from &usize
         .collect();
 
     // Find best split using log-rank statistic

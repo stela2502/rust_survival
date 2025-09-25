@@ -47,6 +47,7 @@ pub fn load_csv(
     }
 
     let mut data = Vec::new();
+    let mut na_rows = 0;
 
     for (i, result) in rdr.records().enumerate() {
         let record = result.map_err(|e| format!("Failed to read row {}: {}", i+2, e))?;
@@ -58,7 +59,10 @@ pub fn load_csv(
                 record.len()
             ).into());
         }
-
+        if record.iter().any(|v| v == "NA" || v.is_empty()) {
+            na_rows +=1;
+            continue;
+        }
         let mut row = Vec::with_capacity(record.len());
         for (j, field) in record.iter().enumerate() {
             let col_name = &headers[j];
@@ -76,6 +80,10 @@ pub fn load_csv(
             row.push(value);
         }
         data.push(row);
+    }
+
+    if na_rows != 0 {
+        eprintln!("{na_rows} rows contained NA - skipped");
     }
 
     Ok((headers.into_iter().map(|s| s.to_string()).collect(), data))

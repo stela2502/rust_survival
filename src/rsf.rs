@@ -80,8 +80,8 @@ fn build_tree(
     }
 
     // Sample features randomly
-    let feature_indices: Vec<usize> = (0..n_features).collect();
-    let sampled_features: Vec<usize> = feature_indices
+    let array_indices: Vec<usize> = (0..n_features).collect();
+    let sampled_features: Vec<usize> = array_indices
         //.iter()                  // convert to iterator
         .choose_multiple(rng, max_features)
         .into_iter()

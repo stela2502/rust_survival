@@ -13,7 +13,8 @@ use rsf::{RSFConfig, fit_rsf};
 use cox::fit_cox;
 use points::{assign_points, total_points};
 use std::collections::HashSet;
-use ndarray::Array2;
+use ndarray:: {Array2, Axis};
+
 
 /// CLI arguments
 #[derive(Parser, Debug)]
@@ -59,6 +60,7 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // --- Parse categorical columns ---
     let categorical_cols: HashSet<String> = if args.categorical.is_empty() {
         HashSet::new()
     } else {
@@ -67,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let delim_byte = args.delimiter.as_bytes()[0];
 
-    // Load CSV
+    // --- Load CSV ---
     let (headers, data) = load_csv(
         &args.file,
         &args.time_col,
@@ -79,38 +81,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_rows = data.len();
     let n_cols = headers.len();
 
-    let mut array = Array2::<f64>::zeros((n_rows, n_cols));
-
-    for i in 0..n_rows {
-        for j in 0..n_cols {
-            array[[i, j]] = data[i][j];
-        }
-    }
-
-
-    // Identify time and status columns
+    // --- Identify time and status columns ---
     let time_idx = headers.iter().position(|h| h == &args.time_col)
-        .ok_or(format!("Time column '{}' not found", args.time_col))?;
+        .ok_or_else(|| format!("Time column '{}' not found\nAvailable colnames: {:?}", args.time_col, headers))?;
     let status_idx = headers.iter().position(|h| h == &args.status_col)
-        .ok_or(format!("Status column '{}' not found", args.status_col))?;
+        .ok_or_else(|| format!("Status column '{}' not found\nAvailable colnames: {:?}", args.status_col, headers))?;
 
-    // Extract time, status, and features
-    let time: Vec<f64> = data.iter().map(|r| r[time_idx]).collect();
-    let status: Vec<u8> = data.iter().map(|r| r[status_idx] as u8).collect();
-
-    // Features: all columns except time/status
+    // --- Feature columns: all except time/status ---
     let feature_indices: Vec<usize> = (0..n_cols)
         .filter(|&i| i != time_idx && i != status_idx)
         .collect();
 
-    let mut features: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
-    for row in &data {
-        let mut feat_row = Vec::with_capacity(feature_indices.len());
-        for &i in &feature_indices {
-            feat_row.push(row[i]);
+    let n_features = feature_indices.len();
+
+    // --- Build feature Array2 ---
+    let mut feature_array = Array2::<f64>::zeros((n_rows, n_features));
+    for (i, row) in data.iter().enumerate() {
+        for (j, &col_idx) in feature_indices.iter().enumerate() {
+            feature_array[[i, j]] = row[col_idx];
         }
-        features.push(feat_row);
     }
+
+    // --- Feature names ---
+    let feature_names: Vec<String> = feature_indices.iter().map(|&i| headers[i].clone()).collect();
+
+    // --- Extract time and status ---
+    let time: Vec<f64> = data.iter().map(|r| r[time_idx]).collect();
+    let status: Vec<u8> = data.iter().map(|r| r[status_idx] as u8).collect();
 
     // --- Step 1: RSF ---
     let rsf_config = RSFConfig {
@@ -120,44 +117,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seed: 42,
     };
 
-    let rsf_model = fit_rsf(&array, &time, &status, &rsf_config);
+    let rsf_model = fit_rsf(&feature_array, &time, &status, &rsf_config);
 
-    // Sort by importance
-    let mut importance_vec: Vec<(usize, f64)> = rsf_model.feature_importance
+    // --- Sort by importance ---
+    let mut importance_vec: Vec<(String, f64)> = rsf_model.feature_importance
         .values()
-        //.iter()
         .enumerate()
-        .map(|(idx, &val)| (idx, val))  // <- dereference the f64
+        .map(|(idx, &val)| (feature_names[idx].clone(), val))
         .collect();
     importance_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     let top_n = args.top_n.min(importance_vec.len());
+
     println!("Top RSF variables:");
-    for (i, (idx, imp)) in importance_vec.iter().take(args.top_n).enumerate() {
-        let col_name = &headers[feature_indices[*idx]];
+    for (i, (col_name, imp)) in importance_vec.iter().take(top_n).enumerate() {
         println!("{}: {} (importance={})", i+1, col_name, imp);
     }
 
-    // Select top features
-    let top_indices: Vec<usize> = importance_vec.iter().take(args.top_n).map(|(idx, _)| *idx).collect();
-    let top_features: Vec<String> = top_indices.iter().map(|&i| headers[feature_indices[i]].clone()).collect();
+    // --- Select top features and map to column indices in feature_array ---
+    let top_features: Vec<String> = importance_vec.iter().take(top_n).map(|(name, _)| name.clone()).collect();
+    let top_indices: Vec<usize> = top_features.iter()
+        .map(|feat| feature_names.iter().position(|h| h == feat)
+            .expect("Top feature not found in feature_names"))
+        .collect();
 
-    // Prepare Cox matrix
-    let mut cox_matrix = ndarray::Array2::<f64>::zeros((n_rows, top_features.len()));
-    for (j, &feat_idx) in top_indices.iter().enumerate() {
-        for i in 0..n_rows {
-            cox_matrix[[i, j]] = features[i][feat_idx];
-        }
+    // --- Prepare Cox matrix (only top features) ---
+    let mut cox_matrix = Array2::<f64>::zeros((n_rows, top_indices.len()));
+    for (j, &feat_col) in top_indices.iter().enumerate() {
+        let column = feature_array.index_axis(Axis(1), feat_col);
+        cox_matrix.column_mut(j).assign(&column);
     }
 
     // --- Step 2: Cox ---
+    println!("Still alive!");
     let cox_model = fit_cox(&cox_matrix, &time, &status, &top_features, 100, 1e-6);
-
-    println!("\nCox model hazard ratios:");
-    for var in &top_features {
-        let hr = cox_model.hr.get(var).unwrap();
-        println!("{} -> HR = {:.3}", var, hr);
-    }
 
     // --- Step 3: Assign points ---
     let points_map = assign_points(&cox_model, args.base_hr);
@@ -166,15 +159,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (var, pt) in &points_map {
         println!("{} -> {} points", var, pt);
     }
-
-    // --- Example: total points for first patient ---
-    let mut patient: HashMap<String, f64> = HashMap::new();
-    for (j, &feat_idx) in top_indices.iter().enumerate() {
-        patient.insert(top_features[j].clone(), features[0][feat_idx]);
+    let results = cox_model.predict( &feature_array, &feature_names , &points_map);
+    println!("\nidx\thazard\tpoints");
+    for (idx, (harzard, points)) in results.iter().enumerate(){
+        println!("{idx}\t{harzard}\t{points}")
     }
-
-    let total = total_points(&patient, &points_map);
-    println!("\nTotal points for first patient: {}", total);
-
     Ok(())
 }
+

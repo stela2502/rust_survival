@@ -5,10 +5,67 @@ use ndarray_linalg::Solve; // for linear algebra
 use std::collections::HashMap;
 
 /// Cox model result
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CoxModel {
-    pub coefficients: HashMap<String, f64>,
+    pub coefficients: Vec<String>,
     pub hr: HashMap<String, f64>,          // hazard ratios
     pub se: HashMap<String, f64>,          // standard errors
+}
+
+impl CoxModel {
+    /// Predict relative risk (exp(hazard)) and total points for a new dataset
+    pub fn predict(
+        &self,
+        new_data: &Array2<f64>,
+        headers: &[String],
+        points_map: &HashMap<String, i32>,
+    ) -> Vec<(f64, i32)> {
+        let n_rows = new_data.nrows();
+        let mut results = Vec::with_capacity(n_rows);
+
+        // Map feature name -> column index
+        let feature_indices: Vec<usize> = self.coefficients.iter()
+            .map(|feat| headers.iter().position(|h| h == feat)
+                .expect("Feature missing in headers"))
+            .collect();
+
+        for i in 0..n_rows {
+            // Linear predictor: sum β_i * x_i, β_i = ln(HR_i)
+            let hazard: f64 = self.coefficients.iter().enumerate()
+                .map(|(j, feat)| {
+                    let beta = self.hr.get(feat).map(|hr| hr.ln()).unwrap_or(0.0);
+                    let x = new_data[[i, feature_indices[j]]];
+                    beta * x
+                })
+                .sum();
+
+            let relative_risk = hazard.exp();
+
+            // Total points
+            let total_points: i32 = self.coefficients.iter()
+                .map(|feat| *points_map.get(feat).unwrap_or(&0))
+                .sum();
+
+            results.push((relative_risk, total_points));
+        }
+
+        results
+    }
+    /// Save model to a binary file using bincode
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, self)?;
+        Ok(())
+    }
+
+    /// Load model from a binary file using bincode
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let model = bincode::deserialize_from(reader)?;
+        Ok(model)
+    }
 }
 
 /// Fit a Cox proportional hazards model
@@ -98,12 +155,12 @@ pub fn fit_cox(
     }
 
     // Prepare outputs
-    let mut coefficients = HashMap::new();
+    let mut coefficients = Vec::new();
     let mut hr = HashMap::new();
     let mut se = HashMap::new();
 
     for (i, name) in feature_names.iter().enumerate() {
-        coefficients.insert(name.clone(), beta[i]);
+        coefficients.push(name.clone());
         hr.insert(name.clone(), beta[i].exp());
         se.insert(name.clone(), (1.0 / final_hessian[[i,i]]).sqrt()); // approximate SE
     }

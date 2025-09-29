@@ -336,7 +336,7 @@ fn run_test(file: &str, patient_col:Option<String>, delimiter: u8, categorical: 
         &feature_array,
         &cox_model.coefficients,
         patient_ids.as_deref(),        // patient IDs
-        Some("predictions.csv"),   // output file
+        output,   // output file
     )?;
 
     Ok(())

@@ -1,125 +1,124 @@
 # rust_survival
 
-USE AT YOUR OWN RISK
+`rust_survival` is a Rust-based survival analysis tool that supports RSF, Cox models, and point scoring.
 
-**RSF → Cox → Points**  
+## Overview
 
-A Rust command-line tool to run **Random Survival Forests (RSF)** on a dataset, select top variables via feature importance, fit a **Cox proportional hazards model**, and assign points for a risk scoring system.
+The workflow:
 
----
+1. **RSF** – Random Survival Forest for feature selection  
+2. **Cox** – Fit a Cox proportional hazards model  
+3. **Points** – Assign point scores based on hazard ratios  
 
 ## Installation
 
+Currently available from GitHub:
+
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/stela2502/rust_survival/
 cd rust_survival
-cargo build --release
+cargo install --path .
 ```
 
-The binary will be available at `target/release/rust_survival`.
+## CLI Usage
 
----
-
-## Usage
+Run `rust_survival` to see main commands:
 
 ```bash
-rust_survival [OPTIONS] --file <FILE> --time-col <TIME_COL> --status-col <STATUS_COL>
+rust_survival -h
 ```
 
-### Options
+### Output:
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-f, --file <FILE>` | Path to CSV dataset | — |
-| `-t, --time-col <TIME_COL>` | Name of survival time column | — |
-| `-s, --status-col <STATUS_COL>` | Name of event status column (0/1) | — |
-| `-c, --categorical <CATEGORICAL>` | Comma-separated categorical columns | `""` |
-| `-n, --n-trees <N_TREES>` | Number of trees for RSF | `100` |
-| `-m, --min-node-size <MIN_NODE_SIZE>` | Minimum node size in RSF trees | `5` |
-| `--top-n <TOP_N>` | Number of top variables to select for Cox | `5` |
-| `--base-hr <BASE_HR>` | Base hazard ratio for 1 point | `1.2` |
-| `-d, --delimiter <DELIMITER>` | CSV delimiter | `"\t"` |
-| `-h, --help` | Print help | — |
-| `-V, --version` | Print version | — |
+```text
+RSF -> Cox -> Points
 
----
+Usage: rust_survival <COMMAND>
 
-## Example
+Commands:
+  train  Train a model from CSV dataset
+  test   Apply a saved model to new data
+  help   Print this message or the help of the given subcommand(s)
 
-Run survival analysis on a CSV dataset:
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+
+## Train a Model
+
+Check the options for training:
 
 ```bash
-rust_survival -f tests/data/survival_lung.csv -t time -s status -c sex,rx -n 200 -m 10 --top-n 5 --base-hr 1.2
+rust_survival train -h
 ```
 
-- **Step 1:** Fits a Random Survival Forest (RSF) to select top variables.  
-- **Step 2:** Fits a Cox proportional hazards model using top variables.  
-- **Step 3:** Assigns points to each variable based on hazard ratios.  
+### Output:
 
-You can optionally specify a delimiter if your CSV is not tab-separated:
+```text
+Train a model from CSV dataset
+
+Usage: rust_survival train [OPTIONS] --file <FILE> --time-col <TIME_COL> --status-col <STATUS_COL> --model <MODEL>
+
+Options:
+  -f, --file <FILE>                    Path to CSV dataset
+  -p, --patient-col <PATIENT_COL>      Name of the Pateient ID column: default first column
+  -t, --time-col <TIME_COL>            Name of survival time column
+  -s, --status-col <STATUS_COL>        Name of event status column (0/1)
+  -e, --exclude-cols <EXCLUDE_COLS>    Future measurements after diagnosis
+  -c, --categorical <CATEGORICAL>      Comma-separated categorical columns [default: ]
+  -n, --n-trees <N_TREES>              Number of trees for RSF [default: 100]
+  -m, --min-node-size <MIN_NODE_SIZE>  Minimum node size in RSF trees [default: 5]
+      --top-n <TOP_N>                  Number of top variables to select for Cox [default: 5]
+      --base-hr <BASE_HR>              Base hazard ratio for 1 point [default: 1.2]
+  -d, --delimiter <DELIMITER>          CSV delimiter [default: "\t"]
+  -m, --model <MODEL>                  File path to save trained model
+      --summary <SUMMARY>              Summary Stats for one column name
+  -h, --help                           Print help
+```
+
+
+## Test a Saved Model
+
+
+⚠️ **Important:** To test a model, your dataset **must include all columns used in the original Cox model**. The required column names can be found in the module file `rust_survival train` did produce (json format). 
+
+Make sure the column names in your CSV match exactly (case, spaces, and punctuation) to avoid errors during model training.
+
+Check the options for testing:
 
 ```bash
-rust_survival -f data.csv -t time -s status -d ","
+rust_survival test -h
 ```
 
-## Output Example
+### Output:
 
-Running the tool on the `survival_lung.csv` dataset:
+```text
+Apply a saved model to new data
 
-```bash
-rust_survival -f tests/data/survival_lung.csv -t time -s status
+Usage: rust_survival test [OPTIONS] --file <FILE> --model <MODEL>
+
+Options:
+  -f, --file <FILE>                Path to CSV dataset
+  -p, --patient-col <PATIENT_COL>  Name of the Pateient ID column: default first column
+  -m, --model <MODEL>              Path to saved Cox/RSF model
+  -o, --output <OUTPUT>            Optional output CSV
+  -d, --delimiter <DELIMITER>      CSV delimiter [default: "\t"]
+  -c, --categorical <CATEGORICAL>  Comma-separated categorical columns [default: ]
+      --base-hr <BASE_HR>          Base hazard ratio for 1 point [default: 1.2]
+  -h, --help                       Print help
 ```
 
-Produces:
-
-```
-61 rows contained NA - skipped
-
-Top RSF variables:
-1: pat.karno (importance=22410)
-2: age (importance=20869)
-3: ph.karno (importance=19437)
-4: meal.cal (importance=19164)
-5: ph.ecog (importance=17758)
-
-Cox model hazard ratios:
-pat.karno -> HR = 0.991
-age -> HR = 1.002
-ph.karno -> HR = 1.022
-meal.cal -> HR = 1.000
-ph.ecog -> HR = 1.596
-
-Points per variable:
-ph.karno -> 0 points
-pat.karno -> 0 points
-ph.ecog -> 3 points
-age -> 0 points
-meal.cal -> 0 points
-
-Total points for first patient: 0
-```
-
-**Notes:**
-
-- Rows containing `NA` in numeric columns are automatically skipped.
-- The top RSF variables are ranked by feature importance.
-- Hazard ratios (HR) are computed via the Cox model.
-- Points are assigned for each variable based on HR, and summed for a total score.
-
----
 
 ## Notes
 
-- Missing numeric values (`NA`) in the dataset will currently cause a parse error. Consider preprocessing your data or using tab/empty strings appropriately.  
-- Categorical columns are optional and should be specified by name.  
-- The first row of your CSV **must contain column headers**.  
+- The patient column is optional; if not provided, row indices are used as IDs.  
+- Categorical columns are automatically encoded and handled during model training.  
+- The `--exclude-cols` option allows you to exclude features measured **after diagnosis**.  
+- Summary statistics can be generated for any factor column using `--summary`.  
 
 ---
 
-## License
-
-MIT / Apache-2.0
-<<<<<<< HEAD
-
-=======
->>>>>>> devel2
+For the latest updates, visit the GitHub repository:  
+[https://github.com/stela2502/rust_survival/](https://github.com/stela2502/rust_survival/)

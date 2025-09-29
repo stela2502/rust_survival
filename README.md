@@ -1,5 +1,7 @@
 # rust_survival
 
+Was fun to implement, BUT IS TOTALLY WORTHLESS IN MY HANDS!
+
 **RSF → Cox → Points**  
 
 A Rust command-line tool to run **Random Survival Forests (RSF)** on a dataset, select top variables via feature importance, fit a **Cox proportional hazards model**, and assign points for a risk scoring system.
@@ -117,3 +119,4 @@ Total points for first patient: 0
 ## License
 
 MIT / Apache-2.0
+

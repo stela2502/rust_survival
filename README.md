@@ -1,6 +1,6 @@
 # rust_survival
 
-Was fun to implement, BUT IS TOTALLY WORTHLESS IN MY HANDS!
+USE AT YOUR OWN RISK
 
 **RSF → Cox → Points**  
 
@@ -119,4 +119,7 @@ Total points for first patient: 0
 ## License
 
 MIT / Apache-2.0
+<<<<<<< HEAD
 
+=======
+>>>>>>> devel2

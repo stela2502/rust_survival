@@ -5,7 +5,6 @@ use csv::{ReaderBuilder, WriterBuilder, StringRecord};
 use ndarray::{Array2, s};
 use anyhow::Result;
 
-
 #[derive(Debug, Clone)]
 pub struct Factor {
     indices: Vec<f64>,                // 0.0..n-1.0 for levels, NaN for missing
@@ -126,6 +125,7 @@ impl SurvivalData {
                     Ok(num) => row.push(num),
                     Err(_) => {
                         // This column is categorical
+                        //println!("Inserting a factor for column '{i}'" );
                         let factor = factors[i].get_or_insert(Factor::with_empty(raw_rows.len()));
                         let _idx = factor.push(trimmed);
                         row.push(_idx);
@@ -148,9 +148,7 @@ impl SurvivalData {
         let mut factor_map: HashMap<String, Factor> = HashMap::new();
         for (i, f_opt) in factors.into_iter().enumerate() {
             if let Some(f) = f_opt {
-                if f.n_levels() <= max_levels {
-                    factor_map.insert(headers[i].clone(), f);
-                }
+                factor_map.insert(headers[i].clone(), f);
             }
         }
 
@@ -160,6 +158,44 @@ impl SurvivalData {
             factors: factor_map,
             max_levels,
         })
+    }
+
+    /// Remove all rows that contain any NaN in numeric_data
+    pub fn filter_all_na_rows(&mut self) {
+        let n_rows = self.numeric_data.nrows();
+        let n_cols = self.numeric_data.ncols();
+
+        // Determine which rows to keep
+        let keep_rows: Vec<usize> = (0..n_rows)
+            .filter(|&i| {
+                !self.numeric_data.row(i).iter().any(|v| v.is_nan())
+            })
+            .collect();
+
+        // Rebuild numeric_data with only the kept rows
+        let mut filtered = Array2::<f64>::zeros((keep_rows.len(), n_cols));
+        for (new_i, &old_i) in keep_rows.iter().enumerate() {
+            filtered
+                .row_mut(new_i)
+                .assign(&self.numeric_data.slice(s![old_i, ..]));
+        }
+        self.numeric_data = filtered;
+
+        // Filter factors: keep only entries for kept rows
+        for factor in self.factors.values_mut() {
+            let mut new_indices = Vec::with_capacity(keep_rows.len());
+            for &old_i in &keep_rows {
+                let v = *factor.indices.get(old_i).unwrap_or(&f64::NAN);
+                new_indices.push(v);
+            }
+            factor.indices = new_indices;
+        }
+
+        println!(
+            "Filtered out {} rows containing NaNs. Remaining rows: {}",
+            n_rows - keep_rows.len(),
+            keep_rows.len()
+        );
     }
 
     /// Impute missing values in `numeric_data` using K-nearest neighbours.
@@ -189,10 +225,17 @@ impl SurvivalData {
             let std  = var.sqrt().max(eps);
             col_means[j] = mean;
             col_stds[j]  = std;
-            for i in 0..n_rows {
-                let v = self.numeric_data[[i, j]];
-                if !v.is_nan() {
-                    scaled[[i, j]] = (v - mean) / std;
+            for j in 0..n_cols {
+                if self.factors.contains_key(&self.headers[j]) {
+                    // factor column → use mode of non-NA values
+                    let mut counts = std::collections::HashMap::new();
+                    for &v in &vals { *counts.entry(v as usize).or_insert(0) += 1; }
+                    let &mode = counts.iter().max_by_key(|(_, c)| *c).unwrap().0;
+                    col_means[j] = mode as f64;  // for later distance scaling, can still normalize if needed
+                } else {
+                    // numeric → mean
+                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    col_means[j] = mean;
                 }
             }
         }
@@ -243,17 +286,28 @@ impl SurvivalData {
                 }
                 if vals.is_empty() { continue; }
 
-                let imputed = if weighted {
-                    let mut num = 0.0;
-                    let mut den = 0.0;
-                    for (v, d) in vals {
-                        let w = 1.0 / (d + eps);
-                        num += w * v;
-                        den += w;
+                let imputed = if self.factors.contains_key(&self.headers[col]) {
+                    // Factor column → mode of neighbors
+                    let mut counts = std::collections::HashMap::new();
+                    for &(v, _) in &vals {
+                        let level = v.round() as usize; // round to nearest valid factor index
+                        *counts.entry(level).or_insert(0) += 1;
                     }
-                    num / den
+                    *counts.iter().max_by_key(|(_, c)| *c).unwrap().0 as f64
                 } else {
-                    vals.iter().map(|(v, _)| v).sum::<f64>() / vals.len() as f64
+                    // Numeric → weighted or regular mean
+                    if weighted {
+                        let mut num = 0.0;
+                        let mut den = 0.0;
+                        for (v, d) in vals {
+                            let w = 1.0 / (d + eps);
+                            num += w * v;
+                            den += w;
+                        }
+                        num / den
+                    } else {
+                        vals.iter().map(|(v, _)| *v).sum::<f64>() / vals.len() as f64
+                    }
                 };
                 self.numeric_data[[i, col]] = imputed;
             }
@@ -294,7 +348,45 @@ impl SurvivalData {
             factor.indices = new_indices;
         }
     }
-        /// Compute fraction of NAs per feature column
+
+    /// Remove columns with variance below `threshold`
+    pub fn filter_low_var(&mut self, threshold: f64) -> usize{
+        let mut keep_cols = Vec::new();
+        let mut filtered = 0;
+        for j in 0..self.numeric_data.ncols() {
+            let col = self.numeric_data.column(j);
+            let vals: Vec<f64> = col.iter().copied().filter(|v| !v.is_nan()).collect();
+            if vals.is_empty() { continue; }
+
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            let var  = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+
+            if var > threshold {
+                keep_cols.push(j);
+            } else {
+                filtered+=1;
+                println!("Dropping low-variance column: {}", self.headers[j]);
+            }
+        }
+
+        // Rebuild numeric_data and headers
+        let mut filtered_data = Array2::<f64>::zeros((self.numeric_data.nrows(), keep_cols.len()));
+        let mut new_headers = Vec::with_capacity(keep_cols.len());
+
+        for (new_j, &old_j) in keep_cols.iter().enumerate() {
+            filtered_data.column_mut(new_j).assign(&self.numeric_data.column(old_j));
+            new_headers.push(self.headers[old_j].clone());
+        }
+
+        self.numeric_data = filtered_data;
+        self.headers = new_headers;
+
+        // Remove factors whose columns were dropped
+        self.factors.retain(|name, _| self.headers.contains(name));
+        filtered
+    }
+
+    /// Compute fraction of NAs per feature column
     pub fn feature_na_fraction(&self) -> HashMap<String, f64> {
         let mut na_frac: HashMap<String, f64> = HashMap::new();
         for (idx, name) in self.headers.clone().into_iter().enumerate() {
@@ -380,6 +472,26 @@ impl SurvivalData {
         self.numeric_data.column(idx).iter()
         .map(|&v| v as u8)  // cast f64 -> u8
         .collect()
+    }
+
+    /// Return a single column as Option<Vec<String>> - if it is a factor
+    pub fn as_vec_string(&self, column: &str) -> Vec<String> {
+        let idx = self
+            .headers
+            .iter()
+            .position(|h| h == column)
+            .expect("Column not found");
+        if self.factors.contains_key( column ){
+            let fact = self.factors.get( column ).unwrap();
+            //println!("I will use the factor {fact:?} to translate the columns ids like {:?}",  self.numeric_data.column(idx).iter().take(10).collect::<Vec<_>>() );
+            self.numeric_data.column(idx).iter()
+                    .map(|&v| fact.get_value( v as usize) )  // translate f64 -> String
+                    .collect()
+        }else {
+            //eprintln!("Column '{column}' is no Factor here\n{:?}\nFactors I have: \n{:?}\n", self.headers, self.factors.keys() );
+            Vec::new()
+        }
+        
     }
 
     /// Write data (numeric + factor) to CSV

@@ -62,7 +62,7 @@ fn log_rank_stat(
     if e_l == 0.0 { 0.0 } else { (o_l - e_l).abs() }
 }
 
-/// Build a single survival tree recursively
+/// Build a single survival tree recursively allowing NA values
 fn build_tree(
     data: &Array2<f64>,
     time: &Vec<f64>,
@@ -76,32 +76,51 @@ fn build_tree(
     let mut node = TreeNode::new(indices.clone());
 
     if indices.len() <= min_node_size {
-        return node;
+        return node; // Leaf node
     }
 
     // Sample features randomly
     let array_indices: Vec<usize> = (0..n_features).collect();
     let sampled_features: Vec<usize> = array_indices
-        //.iter()                  // convert to iterator
         .choose_multiple(rng, max_features)
-        .into_iter()
-        .cloned()               // get Vec<usize> from &usize
+        .cloned()
         .collect();
 
-    // Find best split using log-rank statistic
     let mut best_stat = 0.0;
     let mut best_feature = None;
     let mut best_value = None;
 
+    // Find best split
     for &f in &sampled_features {
-        // candidate split: median of the feature in this node
-        let vals: Vec<f64> = indices.iter().map(|&i| data[[i, f]]).collect();
+        // Only consider rows where feature is not NaN
+        let vals: Vec<f64> = indices.iter()
+            .map(|&i| data[[i, f]])
+            .filter(|v| !v.is_nan())
+            .collect();
+
+        if vals.is_empty() {
+            continue; // Cannot split on this feature
+        }
+
         let median = median(&vals);
 
-        let left_idx: Vec<usize> = indices.iter().cloned().filter(|&i| data[[i,f]] <= median).collect();
-        let right_idx: Vec<usize> = indices.iter().cloned().filter(|&i| data[[i,f]] > median).collect();
+        let left_idx: Vec<usize> = indices.iter()
+            .cloned()
+            .filter(|&i| {
+                let val = data[[i, f]];
+                !val.is_nan() && val <= median
+            })
+            .collect();
 
-        if left_idx.len() == 0 || right_idx.len() == 0 {
+        let right_idx: Vec<usize> = indices.iter()
+            .cloned()
+            .filter(|&i| {
+                let val = data[[i, f]];
+                !val.is_nan() && val > median
+            })
+            .collect();
+
+        if left_idx.is_empty() || right_idx.is_empty() {
             continue;
         }
 
@@ -113,21 +132,30 @@ fn build_tree(
         }
     }
 
-    if best_stat == 0.0 {
-        return node; // cannot split
-    }
+    // If no valid split, return leaf
+    let (f, v) = match (best_feature, best_value) {
+        (Some(f), Some(v)) => (f, v),
+        _ => return node,
+    };
 
-    node.split_feature = best_feature;
-    node.split_value = best_value;
+    node.split_feature = Some(f);
+    node.split_value = Some(v);
 
-    // Split recursively
+    // Split rows for left/right children
     let left_idx: Vec<usize> = indices.iter()
         .cloned()
-        .filter(|&i| data[[i,best_feature.unwrap()]] <= best_value.unwrap())
+        .filter(|&i| {
+            let val = data[[i, f]];
+            !val.is_nan() && val <= v
+        })
         .collect();
+
     let right_idx: Vec<usize> = indices.iter()
         .cloned()
-        .filter(|&i| data[[i,best_feature.unwrap()]] > best_value.unwrap())
+        .filter(|&i| {
+            let val = data[[i, f]];
+            !val.is_nan() && val > v
+        })
         .collect();
 
     node.left = Some(Box::new(build_tree(data, time, status, left_idx, min_node_size, max_features, rng)));

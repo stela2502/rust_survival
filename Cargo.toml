@@ -10,8 +10,10 @@ ndarray-linalg = { version = "0.15", features = ["openblas"] }
 csv = "1.2"
 thiserror = "1.0"
 rand = "0.9.2"
-serde = "1.0.227"
 bincode = "2.0.1"
+anyhow = "1.0.100"
+progressbar = "0.1.0"
+indicatif = "0.18.0"
 
 #clap = { version = "4.3", features = ["derive"] }
 #ndarray = { version = "0.15", features = ["blas"] }

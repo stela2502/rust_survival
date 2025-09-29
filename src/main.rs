@@ -8,111 +8,157 @@ mod rsf;
 mod cox;
 mod points;
 
-use data::load_csv;
 use rsf::{RSFConfig, fit_rsf};
 use cox::fit_cox;
 use points::{assign_points, total_points};
 use std::collections::HashSet;
 use ndarray:: {Array2, Axis};
+use crate::cox::CoxModel;
+use crate::data::SurvivalData;
 
 
-/// CLI arguments
 #[derive(Parser, Debug)]
-#[clap(author="Rust Survival CLI", version="0.1", about="RSF -> Cox -> Points")]
-struct Args {
-    /// Path to CSV dataset
-    #[clap(short, long)]
-    file: String,
+#[clap(author="Rust Survival CLI", version="0.2", about="RSF -> Cox -> Points")]
+enum Command {
+    /// Train a model from CSV dataset
+    Train {
+        /// Path to CSV dataset
+        #[clap(short, long)]
+        file: String,
 
-    /// Name of survival time column
-    #[clap(short, long)]
-    time_col: String,
+        /// Name of survival time column
+        #[clap(short, long)]
+        time_col: String,
 
-    /// Name of event status column (0/1)
-    #[clap(short, long)]
-    status_col: String,
+        /// Name of event status column (0/1)
+        #[clap(short, long)]
+        status_col: String,
 
-    /// Comma-separated categorical columns
-    #[clap(short, long, default_value="")]
-    categorical: String,
+        /// Comma-separated categorical columns
+        #[clap(short, long, default_value="")]
+        categorical: String,
 
-    /// Number of trees for RSF
-    #[clap(short, long, default_value="100")]
-    n_trees: usize,
+        /// Number of trees for RSF
+        #[clap(short, long, default_value="100")]
+        n_trees: usize,
 
-    /// Minimum node size in RSF trees
-    #[clap(short, long, default_value="5")]
-    min_node_size: usize,
+        /// Minimum node size in RSF trees
+        #[clap(short, long, default_value="5")]
+        min_node_size: usize,
 
-    /// Number of top variables to select for Cox
-    #[clap(long, default_value="5")]
-    top_n: usize,
+        /// Number of top variables to select for Cox
+        #[clap(long, default_value="5")]
+        top_n: usize,
 
-    /// Base hazard ratio for 1 point
-    #[clap(long, default_value="1.2")]
-    base_hr: f64,
+        /// Base hazard ratio for 1 point
+        #[clap(long, default_value="1.2")]
+        base_hr: f64,
 
-    /// CSV delimiter: default is tab (\t)
-    #[clap(short='d', long, default_value="\t")]
-    delimiter: String,
+        /// CSV delimiter
+        #[clap(short='d', long, default_value="\t")]
+        delimiter: String,
+
+        /// File path to save trained model
+        #[clap(short='m', long)]
+        model: String,
+    },
+
+    /// Apply a saved model to new data
+    Test {
+        /// Path to CSV dataset
+        #[clap(short, long)]
+        file: String,
+
+        /// Path to saved Cox/RSF model
+        #[clap(short='m', long)]
+        model: String,
+
+        /// Optional output CSV
+        #[clap(short='o', long)]
+        output: Option<String>,
+
+        /// CSV delimiter
+        #[clap(short='d', long, default_value="\t")]
+        delimiter: String,
+
+        /// Comma-separated categorical columns
+        #[clap(short, long, default_value="")]
+        categorical: String,
+
+        /// Base hazard ratio for 1 point
+        #[clap(long, default_value="1.2")]
+        base_hr: f64,
+
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let cmd = Command::parse();
 
-    // --- Parse categorical columns ---
-    let categorical_cols: HashSet<String> = if args.categorical.is_empty() {
-        HashSet::new()
-    } else {
-        args.categorical.split(',').map(|s| s.to_string()).collect()
-    };
-    
-    let delim_byte = args.delimiter.as_bytes()[0];
-
-    // --- Load CSV ---
-    let (headers, data) = load_csv(
-        &args.file,
-        &args.time_col,
-        &args.status_col,
-        &categorical_cols,
-        delim_byte
-    )?;
-
-    let n_rows = data.len();
-    let n_cols = headers.len();
-
-    // --- Identify time and status columns ---
-    let time_idx = headers.iter().position(|h| h == &args.time_col)
-        .ok_or_else(|| format!("Time column '{}' not found\nAvailable colnames: {:?}", args.time_col, headers))?;
-    let status_idx = headers.iter().position(|h| h == &args.status_col)
-        .ok_or_else(|| format!("Status column '{}' not found\nAvailable colnames: {:?}", args.status_col, headers))?;
-
-    // --- Feature columns: all except time/status ---
-    let feature_indices: Vec<usize> = (0..n_cols)
-        .filter(|&i| i != time_idx && i != status_idx)
-        .collect();
-
-    let n_features = feature_indices.len();
-
-    // --- Build feature Array2 ---
-    let mut feature_array = Array2::<f64>::zeros((n_rows, n_features));
-    for (i, row) in data.iter().enumerate() {
-        for (j, &col_idx) in feature_indices.iter().enumerate() {
-            feature_array[[i, j]] = row[col_idx];
+    match cmd {
+        Command::Train { file, time_col, status_col, categorical, n_trees, min_node_size, top_n, base_hr, delimiter, model } => {
+            run_train(&file, &time_col, &status_col, &categorical, n_trees, min_node_size, 
+                top_n, base_hr, delimiter.as_bytes()[0], &model)?;
+        }
+        Command::Test { file, delimiter, categorical, base_hr, model, output } => {
+            run_test(&file, delimiter.as_bytes()[0], &categorical, base_hr, &model, output)?;
         }
     }
 
-    // --- Feature names ---
-    let feature_names: Vec<String> = feature_indices.iter().map(|&i| headers[i].clone()).collect();
+    Ok(())
+}
+fn run_train(file: &str, time_col: &str, status_col: &str, categorical: &str,
+             n_trees: usize, min_node_size: usize, top_n: usize, base_hr: f64,
+             delimiter: u8, model: &str) -> Result<(), Box<dyn std::error::Error>> {
+//fn main() -> Result<(), Box<dyn std::error::Error>> {
+//    let args = Args::parse();
+
+    // --- Parse categorical columns ---
+    let categorical_cols: HashSet<String> = if categorical.is_empty() {
+        HashSet::new()
+    } else {
+        categorical.split(',').map(|s| s.to_string()).collect()
+    };
+    
+    let delim_byte = delimiter;
+
+    let mut survival_data = SurvivalData::from_file(&file, delim_byte, 10)?;
+    survival_data.filter_na( &time_col );
+
+
+    let headers = &survival_data.headers;
+    let n_rows = survival_data.numeric_data.nrows();
+    let n_cols = headers.len();
+
+    let time_idx = headers.iter()
+        .position(|h| h == &time_col)
+        .ok_or(format!("Time column '{}' not found.\nAvailable column: {:?}", time_col, headers))?;
+
+    let status_idx = headers.iter()
+        .position(|h| h == &status_col)
+        .ok_or(format!("Status column '{}' not found.\nAvailable column: {:?}", status_col, headers))?;
+    
+    let feature_names: Vec<String> = survival_data.filter_features_by_na( 0.10);
+    let min_common = ((feature_names.len() as f64) * 0.7).ceil() as usize;
+
+    survival_data.impute_knn( 3, min_common, true );
+
+    let n_features = feature_names.len();
+    let feature_indices: Vec<usize> = feature_names.iter()
+        .filter_map(|name| survival_data.headers.iter().position(|h| h == name))
+        .collect();
+
+    // --- get the feature Array2 ---
+    let feature_array = survival_data.as_array2(Some(&feature_names));
 
     // --- Extract time and status ---
-    let time: Vec<f64> = data.iter().map(|r| r[time_idx]).collect();
-    let status: Vec<u8> = data.iter().map(|r| r[status_idx] as u8).collect();
+    let time:  Vec<f64> = survival_data.as_vec_f64( &time_col );
+    let status: Vec<u8> = survival_data.as_vec_u8( &status_col );
 
     // --- Step 1: RSF ---
     let rsf_config = RSFConfig {
-        n_trees: args.n_trees,
-        min_node_size: args.min_node_size,
+        n_trees: n_trees,
+        min_node_size: min_node_size,
         max_features: None,
         seed: 42,
     };
@@ -127,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     importance_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    let top_n = args.top_n.min(importance_vec.len());
+    let top_n = top_n.min(importance_vec.len());
 
     println!("Top RSF variables:");
     for (i, (col_name, imp)) in importance_vec.iter().take(top_n).enumerate() {
@@ -141,6 +187,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("Top feature not found in feature_names"))
         .collect();
 
+    println!("Identified {} top features:\n{:?}", top_features.len(), top_features);
+    let tmp: Vec<String> = top_indices.iter()
+    .map(|&idx| feature_names[idx].clone())   // or survival_data.headers[idx]
+    .collect();
+    println!("And this is the same from the feature_array colnames:\n{:?}", tmp);
+
     // --- Prepare Cox matrix (only top features) ---
     let mut cox_matrix = Array2::<f64>::zeros((n_rows, top_indices.len()));
     for (j, &feat_col) in top_indices.iter().enumerate() {
@@ -149,11 +201,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Step 2: Cox ---
-    println!("Still alive!");
+    println!("fit COX model!");
     let cox_model = fit_cox(&cox_matrix, &time, &status, &top_features, 100, 1e-6);
-
+    println!("Get points_map");
     // --- Step 3: Assign points ---
-    let points_map = assign_points(&cox_model, args.base_hr);
+    let points_map = assign_points(&cox_model, base_hr);
 
     println!("\nPoints per variable:");
     for (var, pt) in &points_map {
@@ -162,8 +214,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let results = cox_model.predict( &feature_array, &feature_names , &points_map);
     println!("\nidx\thazard\tpoints");
     for (idx, (harzard, points)) in results.iter().enumerate(){
+        println!("{idx}\t{harzard:.3e}\t{points}")
+    }
+    cox_model.to_file( model);
+    println!("Cox Model saved to file {}", model);
+    Ok(())
+}
+
+
+
+// --- TEST ---
+fn run_test(file: &str, delimiter: u8, categorical: &str, base_hr: f64, model_file: &str, output: Option<String>) 
+    -> Result<(), Box<dyn std::error::Error>> {
+
+    // --- Parse categorical columns ---
+    let categorical_cols: HashSet<String> = if categorical.is_empty() {
+        HashSet::new()
+    } else {
+        categorical.split(',').map(|s| s.to_string()).collect()
+    };
+    
+    let delim_byte = delimiter;
+
+    // --- Load CSV ---
+    let mut survival_data = SurvivalData::from_file(&file, delim_byte, 10)?;
+    let headers = &survival_data.headers;
+    let n_rows = survival_data.numeric_data.nrows();
+    let n_cols = headers.len();
+
+    let cox_model = CoxModel::from_file( model_file ).unwrap();
+
+    let feature_array = survival_data.as_array2(Some(&cox_model.coefficients));
+
+    // --- Step 3: Assign points ---
+    let points_map = assign_points(&cox_model, base_hr);
+
+    let results = cox_model.predict( &feature_array, &cox_model.coefficients , &points_map);
+    println!("\nidx\thazard\tpoints");
+    for (idx, (harzard, points)) in results.iter().enumerate(){
         println!("{idx}\t{harzard}\t{points}")
     }
     Ok(())
 }
-

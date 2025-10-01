@@ -1,4 +1,4 @@
-model.dat
+/out/
 *.json
 TCGA_GBM_subset.csv
 /GDCdata/

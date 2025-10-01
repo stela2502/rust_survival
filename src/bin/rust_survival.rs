@@ -11,6 +11,8 @@ use rust_survival::points::Points;
 use rust_survival::rsf::{RSFConfig, fit_rsf};
 
 use std::path::PathBuf;
+use std::fs;
+
 
 #[derive(Parser, Debug)]
 #[clap(author="Rust Survival CLI", version="0.2", about="RSF -> Cox -> Points")]
@@ -46,7 +48,7 @@ enum Command {
         n_trees: usize,
 
         /// Path to factor JSON file
-        #[clap(short, long)]
+        #[clap(long)]
         factors_file: Option<String>,
 
         /// Number of top variables to select for Cox
@@ -148,7 +150,7 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     output.set_extension(""); // remove existing extension
     output = output.with_file_name(format!("{}_as_the_tool_sees_the_data.csv", output.file_stem().unwrap().to_string_lossy()));
 
-    println!("These columns will be forced to be categorials: {:?}",categorical_cols);
+    //println!("These columns will be forced to be categorials: {:?}",categorical_cols);
     let delim_byte = delimiter;
 
 
@@ -156,14 +158,23 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         .unwrap_or_default()
         .into_iter()
         .collect();
+    
     future_cols.insert( time_col.to_string() );
     future_cols.insert( status_col.to_string() );
 
-
     let mut survival_data = SurvivalData::from_file(&file, delim_byte, categorical_cols, &factors_file)?;
 
-    eprintln!("Data summary directly after read:");
-    survival_data.data_summary();
+    let futures:Vec<String> = future_cols.iter().cloned().collect();
+    for future_col in futures {
+        if let Some(factor) = survival_data.factors.get( &future_col ){
+            for add_on in factor.all_column_names() {
+                future_cols.insert( add_on );
+            }          
+        }
+    }
+
+    //println!("Data summary directly after read:");
+    //survival_data.data_summary();
 
     let patient_col = patient_col.unwrap_or_else(|| survival_data.headers[0].clone());
 
@@ -173,22 +184,22 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         println!("removed {filtered} columns due to low varianze in the data");
     }
     
-    eprintln!("Data summary after filter nas:");
-    survival_data.data_summary();
+    //println!("Data summary after filter nas:");
+    //survival_data.data_summary();
     
     let mut feature_names: Vec<String> = survival_data.filter_features_by_na( 0.10);
-    feature_names.retain(|name| !future_cols.contains(name));
+    feature_names.retain(|name| ! ( future_cols.contains(name) || survival_data.exclude.contains( name ) ) );
 
-    eprintln!("Data summary after filter by na:");
-    survival_data.data_summary();
+    //println!("Data summary after filter by na:");
+    //survival_data.data_summary();
 
     let min_common = ((feature_names.len() as f64) * 0.7).ceil() as usize;
     survival_data.impute_knn( 3, min_common, true );
 
     survival_data.filter_all_na_rows(&feature_names);
 
-    eprintln!("Data summary after filter_all_na_rows:");
-    survival_data.data_summary();
+    //println!("Data summary after filter_all_na_rows:");
+    //survival_data.data_summary();
     
     let n_rows = survival_data.numeric_data.nrows();
 
@@ -196,11 +207,12 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     let feature_array = survival_data.as_array2(Some(&feature_names));
 
 
-    for j in 0..feature_array.ncols() {
+    /*for j in 0..feature_array.ncols() {
+        // check every data rwo
         let col = feature_array.column(j);
         let unique_vals: HashSet<String> = col.iter().map(|v| v.to_string() ).collect();
-        eprintln!("Col {}: {} unique values: top 10 {:?}", feature_names[j], unique_vals.len(), unique_vals.iter().take( unique_vals.len().min(10) ).cloned().collect::<Vec<String>>());
-    }
+        println!("Col {}: {} unique values: top 10 {:?}", feature_names[j], unique_vals.len(), unique_vals.iter().take( unique_vals.len().min(10) ).cloned().collect::<Vec<String>>());
+    }*/
     // --- Extract time and status ---
     let time:  Vec<f64> = survival_data.as_vec_f64( &time_col );
 
@@ -208,10 +220,10 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     let min_val = *status_raw.iter().min().unwrap_or(&0);
     let max_val = *status_raw.iter().max().unwrap_or(&1);
 
-    println!("Status column range: min={} max={}", min_val, max_val);
+    //println!("Status column range: min={} max={}", min_val, max_val);
 
     if min_val != 0 {
-        eprintln!("Warning: status column minimum is {}. Cox model expects 0/1 coding.", min_val);
+        println!("Warning: status column minimum is {}. Cox model expects 0/1 coding.", min_val);
     }
 
     // Now you can safely coerce values > 1 to 1
@@ -224,8 +236,8 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         }
     }
 
-    eprintln!("Data summary before random forest:");
-    survival_data.data_summary();
+    //println!("Data summary before random forest:");
+    //survival_data.data_summary();
 
     // --- Step 1: RSF ---
     let rsf_config = RSFConfig {
@@ -278,8 +290,8 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     println!("fit COX model!");
     let cox_model = CoxModel::fit(&cox_matrix, &time, &status, &top_features, 100, 1e-6);
 
-    let _ =cox_model.to_file( model);
     println!("The cox model:{}", cox_model);
+
 
     println!("Get points_map");
     // --- Step 3: Assign points ---
@@ -305,9 +317,11 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         }
     }
 
-    eprintln!("Data summary before data export:");
-    survival_data.data_summary();
+    //println!("Data summary before data export:");
+    //survival_data.data_summary();
     survival_data.to_file( output, delim_byte );
+
+    println!( "Saving the cox model {:?}",cox_model.to_file( model));
     println!("Cox Model saved to file {}", model);
     Ok(())
 }

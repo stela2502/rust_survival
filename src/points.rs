@@ -182,7 +182,7 @@ impl Points {
                     }
                 },
                 None => {
-                    eprintln!("The column '{col}' does not seam to be a factor in the survival data:\n{:?}",survival_data.headers );
+                    println!("The column '{col}' does not seam to be a factor in the survival data:\n{:?}",survival_data.headers );
                     // Split results into hazard and points
                     let hazards: Vec<f64> = results.iter().map(|(h, _)| *h).collect();
                     let points: Vec<f64>  = results.iter().map(|(_, p)| *p as f64).collect();

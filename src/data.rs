@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 use serde_json;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
-
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Factor {
@@ -17,6 +17,17 @@ pub struct Factor {
     pub level_to_index: HashMap<String, f64>, // fast lookup
     matching:Option<Vec<String>>, // this could match to multiple column names. Like SNP or something
     one_hot: bool, // NEW
+}
+
+
+impl fmt::Display for Factor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Factor '{}':", self.column_name)?;
+        writeln!(f, "  One-hot: {}", self.one_hot)?;
+        writeln!(f, "  Levels: {:?}", self.levels)?;
+        writeln!(f, "  Matching: {:?}", self.matching)?;
+        writeln!(f, "  All columns: {:?}", self.all_column_names())
+    }
 }
 
 /// Only save labels in JSON
@@ -29,15 +40,20 @@ pub struct FactorJson {
     one_hot: bool, // NEW
 }
 
+
 impl Factor {
-    /*
-    pub fn new() -> Self {
-        Self {
+    
+    /// Create a new Factor with a column name and one_hot flag
+    pub fn new(column_name: &str, one_hot: bool) -> Self {
+        Factor {
+            column_name: column_name.to_string(),
             indices: Vec::new(),
             levels: Vec::new(),
             level_to_index: HashMap::new(),
+            matching: None,
+            one_hot,
         }
-    }*/
+    }
 
     pub fn with_empty(fill: usize, column_name:&str) -> Self {
         Self {
@@ -57,6 +73,7 @@ impl Factor {
         }
     }
 
+    /// returns all one_hot column names or the original colum, name only
     pub fn all_column_names(&self ) -> Vec<String> {
         if self.one_hot {
              self
@@ -64,12 +81,18 @@ impl Factor {
                 .iter()
                 .map(|lvl| self.build_one_hot_column(lvl)).collect()
         }else {
+            //vec![]
             vec![ self.column_name.to_string() ]
         }
     }
 
     fn build_one_hot_column( &self, value:&str) -> String {
-        format!("{}_{}", self.column_name, value)
+        if self.one_hot {
+            format!("{}_{}", self.column_name, value)
+        }else {
+            self.column_name.clone()
+        }
+        
     }
 
     /// Push a value for this factor.
@@ -82,14 +105,14 @@ impl Factor {
 
         // Handle one-hot encoding
         let ret = if self.one_hot {
-            println!("See we have a one_hot here! {} - trimmed {}", self.column_name, trimmed);
+            //println!("See we have a one_hot here! {} - trimmed {}", self.column_name, trimmed);
             let idx = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NA") {
                 f64::NAN
             }else {
                 1.0
             };
             // all other levels become zero columns
-            let zero_cols: Vec<String> = self.all_column_names( );
+            let zero_cols = self.all_column_names( );
             let zero_cols_option = if zero_cols.len() == 1 { None } else { Some(zero_cols) };
             (idx, self.build_one_hot_column( trimmed ) , zero_cols_option)
         } else {
@@ -108,7 +131,7 @@ impl Factor {
             };
             (idx, self.column_name.to_string() , None)
         };
-        println!("We {} return a value of {}", ret.1, ret.0);
+        //println!("   We '{}' return a value of {}", ret.1, ret.0);
         ret
     }
 
@@ -186,26 +209,6 @@ impl Factor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SurvivalData {
-    pub headers: Vec<String>,
-    pub numeric_data: Array2<f64>,
-    pub factors: HashMap<String, Factor>,
-    pub exclude: HashSet<String>,
-    //pub max_levels: usize,
-}
-
-impl Default for SurvivalData {
-    fn default() -> Self {
-        SurvivalData {
-            headers: Vec::new(),
-            numeric_data: Array2::zeros((0, 0)),
-            factors: HashMap::new(),
-            exclude: HashSet::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,17 +265,56 @@ mod tests {
     }
 }
 
+
+#[derive(Debug, Clone)]
+pub struct SurvivalData {
+    pub headers: Vec<String>,
+    pub numeric_data: Array2<f64>,
+    pub factors: HashMap<String, Factor>,
+    pub exclude: HashSet<String>,
+    //pub max_levels: usize,
+}
+
+impl Default for SurvivalData {
+    fn default() -> Self {
+        SurvivalData {
+            headers: Vec::new(),
+            numeric_data: Array2::zeros((0, 0)),
+            factors: HashMap::new(),
+            exclude: HashSet::new(),
+        }
+    }
+}
+
+impl fmt::Display for SurvivalData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "SurvivalData Summary:")?;
+        writeln!(f, "Rows: {}, Columns: {}", self.numeric_data.nrows(), self.numeric_data.ncols())?;
+        writeln!(f, "Headers:")?;
+        for (idx, header) in self.headers.iter().enumerate() {
+            writeln!(f, "  {}: {}", idx, header)?;
+        }
+        writeln!(f, "Factors:")?;
+        for (_name, factor) in &self.factors {
+            writeln!(f,"{}",factor );
+        }
+        writeln!(f, "Excluded columns: {:?}", self.exclude)
+    }
+}
+
+
 impl SurvivalData {
 
     /// Read CSV file and build numeric + factor representation
-    pub fn from_file<P: AsRef<Path> + std::fmt::Debug, FF: AsRef<Path> + std::fmt::Debug>
-    (file_path: P, delimiter: u8, categorical_cols: HashSet<String>, factors_file: FF) -> Result<Self> {
+    pub fn from_file<P: AsRef<Path> + std::fmt::Debug, FF: AsRef<Path> + std::fmt::Debug>(file_path: P, delimiter: u8, 
+        categorical_cols: HashSet<String>, factors_file: FF) -> Result<Self> {
 
         // 1. Start with an empty SurvivalData
         let mut ret = SurvivalData::default();
 
         // 2. Load factors if the file exists, otherwise keep empty
         if factors_file.as_ref().exists() {
+            println!("Factors are loaded from file");
             ret.load_factors(&factors_file)?;
         }
 
@@ -286,9 +328,13 @@ impl SurvivalData {
             .iter()
             .flat_map(|s| {
                 if let Some(fact) = ret.factors.get(s) {
-                    let mut cols = vec![s.to_string()];
-                    cols.extend(fact.all_column_names());
-                    cols
+                    if fact.one_hot {
+                        let mut c = vec![s.to_string()];
+                        c.extend(fact.all_column_names());
+                        c
+                    } else {
+                        vec![s.to_string()]      // just the original column
+                    }
                 } else {
                 vec![s.to_string()] // wrap the single name in a Vec
             }})
@@ -314,10 +360,12 @@ impl SurvivalData {
         for header in &headers {
             if categorical_cols.contains(header) {
                 // Insert a Factor for this categorical column if it does not exist yet
+                println!("Forcing header {header} to be a factor");
                 ret.factors.entry(header.clone())
                 .or_insert_with(|| Factor::with_empty(0, &header));
             }
         }
+        ret.headers = headers.clone();
 
         // 4. lead the data and handle the factors
         for result in rdr.records() {
@@ -326,38 +374,38 @@ impl SurvivalData {
             let mut expanded = 0;
             for (i, value) in record.iter().enumerate() {
                 let trimmed = value.trim().trim_matches('"');
-                /*
-                    if let Some(factor) = ret.factors.get_mut(&headers[i]) {
-                        factor.push_missing();
-                    }
-                    row.push(f64::NAN);
-                    continue;
-                }*/
-
                 match trimmed.replace(',', ".").parse::<f64>() {
                     Ok(num) => {
-                        //println!("We actually identifed a number here '{}' :'{}'", headers[i], num);
-                        if let Some(factor) = ret.factors.get_mut(&headers[i]) {
-                            //println!("But we also have a factor for that column '{}'!", headers[i]);
+                        //println!("We actually identifed a number here '{}' :'{}'", headers[i+expanded], num);
+                        if let Some(factor) = ret.factors.get_mut(&headers[i+expanded]) {
+                            //println!("   But we also have a factor for that column '{}'!", headers[i+expanded]);
+                            //let mut parts= Vec::<String>::with_capacity( factor.levels.len() +1);
+                            
                             let (idx, col_to_add, all_cols) = factor.push( &num.to_string() );
                             let alt = if idx.is_nan() { f64::NAN }else { 0.0 };
+
                             match all_cols {
                                 Some(cols) => {
                                     expanded += cols.len();
                                     // fill the original column!
+                                    //parts.push(format!("dense factor: {}", factor.get_f64(trimmed) ) );
                                     row.push( factor.get_f64(trimmed) ); 
                                     for cname in cols.iter().cloned(){
                                         if cname == col_to_add { 
+                                            //parts.push(format!("hot: {}", idx ) );
                                             row.push(idx);
                                         } else {
+                                            //parts.push(format!("hot: {}", alt ) );
                                             row.push(alt); 
                                         }
                                     }
                                 },
                                 None => {
+                                    //parts.push(format!("No hot columns!? dense it is then : {}", idx ) );
                                     row.push(idx);
                                 },
                             }
+                            //println!("   Adding the values {}", parts.join(", "));
                         } else {
                             //println!("Push the value {} to column {} at row count {}", num,  headers[i+expanded], row.len());
                             row.push(num as f64);
@@ -372,6 +420,11 @@ impl SurvivalData {
                             }
                         }
                         // Treat as categorical
+                        //eprintln!("looking for a not hot column name at {} + {}: {}",i, expanded, i+expanded);
+                        if headers.len() == i+expanded {
+                            eprintln!( "i {}; expanded {}", i, expanded );
+                            panic!( "{}", ret.header_error( i, expanded ) );
+                        }
                         let factor = ret.factors
                         .entry(headers[i+expanded].clone())
                         .or_insert_with(|| Factor::with_empty(raw_rows.len(), &headers[i+expanded]) );
@@ -401,7 +454,10 @@ impl SurvivalData {
                     }
                 }
             }
+            assert_eq!(row.len() , record.len() + expanded, "After reading one row: Row length and expeceted row length do not aligne {} vs {}:\n{}\n and the row values:\n{:?}", 
+                row.len() , record.len() + expanded, ret.header_error( record.len() , expanded ), row );
             raw_rows.push(row);
+
         }
 
         // 5. create the numeric_data from the Vec<Vec<f64>>
@@ -422,19 +478,65 @@ impl SurvivalData {
         if ! factors_file.as_ref().exists() {
             println!("Saved a new factors file to fine tune the factors: '{:?}'", &factors_file);
             ret.save_factors(&factors_file)?;
+            panic!("
+Please review and update the factors file so that it accurately reflects the logic in the data.
+
+The factors file is a JSON-formatted file, for example:
+
+[
+  {{
+    'column': 'status2',
+    'levels': [
+      '1',
+      '0'
+    ],
+    'numeric': [
+      0.0,
+      1.0
+    ],
+    'matching': null,
+    'one_hot': false
+  }}
+]
+In this example, there is an error: the numeric values do not match the actual data. They should be [1.0, 0.0]. Once corrected, the factor will work as expected.
+
+
+The one_hot option allows the factor to be expanded into multiple 0.0/1.0 columns—two in this case. This is particularly useful when the factor levels have no inherent numeric order or relationship:
+
+
+Factor: tp53_mutation_type
+Levels: Missense, Nonsense, Frameshift, Splice_site, Silent
+Notes: This factor is categorical with no inherent order, so it’s a good candidate for one-hot encoding in a model. Each level would be represented as a separate binary column (0/1) if one-hot encoding is used.
+
+                ");
         }
 
         Ok(ret)
     }
 
+    fn header_error( &self, i: usize, expanded: usize) -> String {
+        let mut parts:Vec<String> = Vec::with_capacity( self.factors.len() + 1 );
+        for factor in self.factors.values() {
+            parts.push( format!("{}", factor ) );
+        }
+        parts.push(format!("Headers have the length {} and we would want id {}:\n{}", self.headers.len(), i+expanded, self.headers
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, h)| format!("{}: {}", idx, h))
+                            .collect::<Vec<_>>()
+                            .join("\n") ) );
+
+        parts.join("\n")
+    }
+
     pub fn data_summary( &self ) {
         return ;
-        eprintln!("Shape: {} rows x {} columns", self.numeric_data.nrows(), self.numeric_data.ncols());
+        println!("Shape: {} rows x {} columns", self.numeric_data.nrows(), self.numeric_data.ncols());
 
         // 2️⃣ Check first few rows
-        eprintln!("First 5 rows:");
+        println!("First 5 rows:");
         for i in 0..self.numeric_data.nrows().min(5) {
-            eprintln!("{:?}", self.numeric_data.row(i).to_vec());
+            println!("{:?}", self.numeric_data.row(i).to_vec());
         }
 
         // 3️⃣ Column-wise summaries
@@ -443,7 +545,7 @@ impl SurvivalData {
             let n_total = col.len();
             let n_na = col.iter().filter(|v| v.is_nan()).count();
             let mean = col.iter().filter(|v| !v.is_nan()).sum::<f64>() / (n_total - n_na) as f64;
-            eprintln!(
+            println!(
                 "Col {}: NA fraction = {:.2}, mean of non-NA = {:.2}", 
                 j, n_na as f64 / n_total as f64, mean
             );
@@ -793,7 +895,7 @@ impl SurvivalData {
                     .map(|&v| fact.get_value( v as usize) )  // translate f64 -> String
                     .collect())
         }else {
-            //eprintln!("Column '{column}' is no Factor here\n{:?}\nFactors I have: \n{:?}\n", self.headers, self.factors.keys() );
+            //println!("Column '{column}' is no Factor here\n{:?}\nFactors I have: \n{:?}\n", self.headers, self.factors.keys() );
             None
         }
         
@@ -849,4 +951,228 @@ impl SurvivalData {
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod tests_one_hot_factors {
+    use super::*;
+    use std::fs;
+    use std::collections::HashSet;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_save_and_load_factors() -> Result<(), Box<dyn std::error::Error>> {
+        // --- Temp directory ---
+        let dir =  PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let factors_path = dir.as_path().join("factors.json");
+
+        // --- Create Factors ---
+        let mut color = Factor::new("Color", false);
+        let _ = color.push("Red");
+        let _ = color.push("Blue");
+        let _ = color.push("Green");
+        color.one_hot = true;
+
+        let mut number = Factor::new("Number", false);
+        let _ = number.push("1");
+        let _ = number.push("2");
+        let _ = number.push("3");
+        number.one_hot = true;
+
+        // --- Insert into SurvivalData ---
+        let mut data = SurvivalData::default();
+        data.factors.insert("Color".to_string(), color);
+        data.factors.insert("Number".to_string(), number);
+
+        // --- Save factors to JSON ---
+        data.save_factors(&factors_path)?;
+
+        // --- Read JSON file back ---
+        data.factors = HashMap::new();
+        let json_content = fs::read_to_string(&factors_path)?;
+        println!("Saved JSON:\n{}", json_content);
+        data.load_factors(&factors_path)?;
+
+        // --- Deserialize to check ---
+        let loaded_factors = data.factors;
+
+        // 1️⃣ Check that both factors exist
+        assert!(loaded_factors.contains_key("Color"), "Color factor exists after load");
+        assert!(loaded_factors.contains_key("Number"), "Number factor exists after load");
+
+        // 2️⃣ Check levels for Color
+        let color = loaded_factors.get("Color").unwrap();
+        assert_eq!(color.levels, vec!["Red", "Blue", "Green"], "Color levels match");
+        assert_eq!(color.one_hot, true, "Color one_hot flag preserved");
+
+        // 3️⃣ Check levels for Number
+        let number = loaded_factors.get("Number").unwrap();
+        assert_eq!(number.levels, vec!["1", "2", "3"], "Number levels match");
+        assert_eq!(number.one_hot, true, "Number one_hot flag preserved");
+
+        // 4️⃣ Check level_to_index maps
+        for (idx, lvl) in color.levels.iter().enumerate() {
+            let mapped_idx = color.level_to_index.get(lvl).unwrap();
+            assert_eq!(*mapped_idx, idx as f64, "Color level_to_index correct for {}", lvl);
+        }
+
+        for (idx, lvl) in number.levels.iter().enumerate() {
+            let mapped_idx = number.level_to_index.get(lvl).unwrap();
+            assert_eq!(*mapped_idx, idx as f64, "Number level_to_index correct for {}", lvl);
+        }
+
+        // 5️⃣ Check that indices vector is empty (not yet populated)
+        assert!(color.indices.is_empty(), "Color indices empty after load");
+        assert!(number.indices.is_empty(), "Number indices empty after load");
+
+        assert_eq!( color.all_column_names(), vec![ "Color_Red".to_string(), "Color_Blue".to_string(),"Color_Green".to_string()] ,"Color all headers");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+use std::path::PathBuf;
+
+mod tests_survival_data_from_file_one_hot_factors {
+    use super::*;
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::collections::HashSet;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_survivaldata_one_hot_factors() -> Result<(), Box<dyn std::error::Error>> {
+        // --- Prepare temporary directory ---
+        let dir =  PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let csv_path = dir.as_path().join("test_factors.csv");
+        let factors_path = dir.as_path().join("test_factors_factors.json");
+
+        // --- Write CSV file ---
+        // Two categorical columns: Color, Number
+        // Values: Color = Red Blue Blue Green Blue Red Na Na
+        //         Number = 1 2 1 3 2 1 Na Na
+        let csv_content = "\
+Color,Number
+Red,1
+Blue,2
+Blue,1
+Green,3
+Blue,2
+Red,1
+Na,Na
+Na,Na
+";
+        let mut file = File::create(&csv_path)?;
+        file.write_all(csv_content.as_bytes())?;
+
+        let mut color = Factor::new("Color", false);
+        let _ = color.push("Red");
+        let _ = color.push("Blue");
+        let _ = color.push("Green");
+        color.one_hot = true;
+        
+        let mut number = Factor::new("Number", false);
+        let _ = number.push("1");
+        let _ = number.push("2");
+        let _ = number.push("3");
+        number.one_hot = true;
+        let mut temp = SurvivalData::default();
+        temp.factors.insert( "Color".to_string(), color);
+        temp.factors.insert( "Nubmer".to_string(), number);
+
+        temp.save_factors(&factors_path); //default location
+        let categorical_cols= HashSet::<String>::new();
+        // --- Load SurvivalData ---
+        let data = SurvivalData::from_file(&csv_path, b',', categorical_cols, &factors_path)?;
+
+        // --- Assertions ---
+
+        // 1️⃣ Check original factor columns contain indices / NaN
+        println!("The data object: {data}");
+        let color_idx_col = data.headers.iter().position(|h| h == "Color").unwrap();
+        let number_idx_col = data.headers.iter().position(|h| h == "Number").unwrap();
+        assert_eq!(color_idx_col, 0, "expected color_idx_col 0 - have these cols: {:?}", &data.headers);
+        assert_eq!(number_idx_col, 4, "expected number_idx_col 4 - have these cols: {:?}", &data.headers);
+
+        assert_eq!(data.numeric_data[[0, color_idx_col]], 0.0); // Red first index 0
+        assert_eq!(data.numeric_data[[1, color_idx_col]], 1.0); // Blue index 1
+        assert!(data.numeric_data[[6, color_idx_col]].is_nan()); // Na
+
+        assert_eq!(data.numeric_data[[0, number_idx_col]], 0.0); // 1 -> index 0
+        assert_eq!(data.numeric_data[[1, number_idx_col]], 1.0); // 2 -> index 1
+        assert!(data.numeric_data[[6, number_idx_col]].is_nan()); // Na
+
+        assert_eq!(data.headers[1], "Color_Red");
+
+
+        // Find the indices of the one-hot columns
+        let color_red_idx = data.headers.iter().position(|h| h == "Color_Red").unwrap();
+        let color_blue_idx = data.headers.iter().position(|h| h == "Color_Blue").unwrap();
+        let color_green_idx = data.headers.iter().position(|h| h == "Color_Green").unwrap();
+
+        let number_1_idx = data.headers.iter().position(|h| h == "Number_1").unwrap();
+        let number_2_idx = data.headers.iter().position(|h| h == "Number_2").unwrap();
+        let number_3_idx = data.headers.iter().position(|h| h == "Number_3").unwrap();
+
+        // --- Expected one-hot values per row ---
+        // Rows: Color = Red, Blue, Blue, Green, Blue, Red, NA, NA
+        //       Number = 1,2,1,3,2,1,NA,NA
+        let expected_color = vec![
+            (1.0, 0.0, 0.0), // Red
+            (0.0, 1.0, 0.0), // Blue
+            (0.0, 1.0, 0.0), // Blue
+            (0.0, 0.0, 1.0), // Green
+            (0.0, 1.0, 0.0), // Blue
+            (1.0, 0.0, 0.0), // Red
+            (f64::NAN, f64::NAN, f64::NAN), // NA
+            (f64::NAN, f64::NAN, f64::NAN), // NA
+        ];
+
+        let expected_number = vec![
+            (1.0, 0.0, 0.0), // 1
+            (0.0, 1.0, 0.0), // 2
+            (1.0, 0.0, 0.0), // 1
+            (0.0, 0.0, 1.0), // 3
+            (0.0, 1.0, 0.0), // 2
+            (1.0, 0.0, 0.0), // 1
+            (f64::NAN, f64::NAN, f64::NAN), // NA
+            (f64::NAN, f64::NAN, f64::NAN), // NA
+        ];
+
+        for row in 0..data.numeric_data.nrows() {
+            // Color
+            let val_red = data.numeric_data[[row, color_red_idx]];
+            let val_blue = data.numeric_data[[row, color_blue_idx]];
+            let val_green = data.numeric_data[[row, color_green_idx]];
+
+            let (exp_red, exp_blue, exp_green) = expected_color[row];
+            if exp_red.is_nan() {
+                assert!(val_red.is_nan());
+                assert!(val_blue.is_nan());
+                assert!(val_green.is_nan());
+            } else {
+                assert_eq!(val_red, exp_red);
+                assert_eq!(val_blue, exp_blue);
+                assert_eq!(val_green, exp_green);
+            }
+
+            // Number
+            let val_1 = data.numeric_data[[row, number_1_idx]];
+            let val_2 = data.numeric_data[[row, number_2_idx]];
+            let val_3 = data.numeric_data[[row, number_3_idx]];
+
+            let (exp_1, exp_2, exp_3) = expected_number[row];
+            if exp_1.is_nan() {
+                assert!(val_1.is_nan(), "expected NA value for Number_1 at row {row}; all data {}",data.numeric_data);
+                assert!(val_2.is_nan(), "expected NA value for Number_2 at row {row}; all data {}",data.numeric_data);
+                assert!(val_3.is_nan(), "expected NA value for Number_3 at row {row}; all data {}",data.numeric_data);
+            } else {
+                assert_eq!(val_1, exp_1, "Number_1 mismatch at row {}/{}: {} != {} all data {}", number_1_idx, row, val_1, exp_1,data.numeric_data);
+                assert_eq!(val_2, exp_2, "Number_2 mismatch at row {}/{}: {} != {} all data {}", number_2_idx, row, val_2, exp_2,data.numeric_data);
+                assert_eq!(val_3, exp_3, "Number_3 mismatch at row {}/{}: {} != {} all data {}", number_3_idx, row, val_3, exp_3,data.numeric_data);
+            }
+        }
+
+        Ok(())
+    }
 }

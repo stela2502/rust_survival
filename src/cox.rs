@@ -4,7 +4,8 @@ use ndarray::{Array1, Array2, Axis};
 use ndarray_linalg::Solve; // for linear algebra
 use std::collections::HashMap;
 
-use std::fs::File;
+use std::fs::{self, File};
+use std::path::PathBuf;
 use std::io::{BufWriter};
 use serde::{Serialize, Deserialize};
 use serde_json;
@@ -78,7 +79,7 @@ impl CoxModel {
         for i in 0..data.nrows() {
             for j in 0..data.ncols() {
                 if data[[i,j]].is_nan() {
-                    eprintln!("NaN at row {}, col {}", i, j);
+                    println!("NaN at row {}, col {}", i, j);
                 }
             }
         }
@@ -172,6 +173,12 @@ impl CoxModel {
     }
 
     pub fn to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let output = PathBuf::from(path.as_ref());
+        if let Some(parent) = output.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?; // creates all missing parent directories
+            }
+        }
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
         let _ = serde_json::to_writer_pretty(writer, self)?;

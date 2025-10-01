@@ -111,6 +111,40 @@ Options:
 ```
 
 
+## Usage Example
+
+You can dowanoad (the MATABRIC data from kaggle)[www.kaggle.com/datasets/gunesevitan/breast-cancer-metabric].
+
+
+The command to train a model from this data is this:
+```bash
+rust_survival train -f ~/Downloads/Breast_Cancer_METABRIC.csv -p "Patient ID" -m ~/Downloads/Breast_Cancer_METABRIC_COX_model.json  -d , --status-col "Overall Survival Status" --n-trees 1000 --time-col "Overall Survival (Months)" --top-n 30 --summary "Patient's Vital Status" --exclude-cols "Type of Breast Surgery,Chemotherapy,Pam50 + Claudin-low subtype,Integrative Cluster,Lymph nodes examined positive ,Mutation Count,Nottingham prognostic index,Overall Survival (Months),Overall Survival Status,Relapse Free Status (Months),Relapse Free Status,Patient's Vital Status"
+```
+
+You see we are exluding many columns from the model building, as they might not be available at an early timepoint.
+And a predictive model would be best if it would usable early on - right?
+
+When you run this the first time the tool will create a features.json file ``~/Downloads/Breast_Cancer_METABRIC_features.json`` that describes how the not numeric data is translated into purely numeric values needed for the model building (fatorization).
+
+There are two main startegies for building a factor:
+
+1. the not numeric values have a numeric conection like e.g "serverity" "low", "medium" and "high". Thouse could easily be translated into 1,2 and 3.
+2. Unrelated measurements like Cancer subtypes. These cancer subtypes should not be used as a single factor, but broken up into multiple 0/1 categories.
+
+The Json file is a simple text file and can be modifies with any text editor like gedit or notepad.
+For case 1 you would simply adjust the "numeric" value to the apprpriate number. 
+For case 2 you can simply set the "one_hot" value to true.
+
+Afterwards you can simply re-run the model testing.
+THis will select likely predictive features using a RandForestSurvival model and later on use these likely predictive columns to build the COX model and from this the hazard values and points system.
+
+Later on you can use a table with only the predictve column to "test" the patients for hazard value and points.
+
+This system is untested and under development until tested, but the results look promising in the way that the model does find differences in the training data. I have not even tested it with fresh data.
+
+Likely close to everything apart from data loading and factorization is up for change.
+
+
 ## Test Case
 
 This repo contains a test dataset exoported from the R Survival package: ``tests/data/survival_lung.csv``.

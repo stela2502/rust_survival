@@ -4,8 +4,8 @@ use rust_survival::cox::CoxModel;
 
 
 const TRAIN_CSV: &str = "tests/data/survival_lung.csv";
-const MODEL_JSON: &str = "tests/tmp_model.json";
-const PRED_CSV: &str = "tests/tmp_predictions.csv";
+const MODEL_JSON: &str = "tests/data/survival_lung_factors.json";
+const PRED_CSV: &str = "tests/data/tmp_predictions.csv";
 
 #[test]
 fn integration_train_and_test() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,7 +32,7 @@ fn integration_train_and_test() -> Result<(), Box<dyn std::error::Error>> {
     let model: CoxModel = CoxModel::from_file(MODEL_JSON).expect("Failed to load model");
     assert!(!model.coefficients.is_empty(), "Model must have coefficients");
     assert_eq!(model.coefficients.len(), model.hr.len(), "HRs must match coefficients");
-    assert_eq!(model.coefficients.len(), top_n, "got exacly as many coefficients as I asked for");
+    assert_eq!(model.coefficients.len(), 5, "got exacly as many coefficients as I asked for");
 
 
     // Check that model file was created
@@ -54,7 +54,7 @@ fn integration_test_only() -> Result<(), Box<dyn std::error::Error>> {
     let mut test_cmd = Command::cargo_bin("rust_survival")?;
     test_cmd.args(&[
         "test",
-        "--file", TEST_CSV,
+        "--file", TRAIN_CSV,
         "--model", MODEL_JSON,
         "--output", PRED_CSV,
     ]);

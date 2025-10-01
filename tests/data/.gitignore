@@ -1,1 +1,5 @@
 model.dat
+*.json
+TCGA_GBM_subset.csv
+/GDCdata/
+~.lock*

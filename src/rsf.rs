@@ -1,14 +1,18 @@
 // src/rsf.rs
 
 use ndarray::Array2;
-use rand::seq::SliceRandom;
 use rand::{SeedableRng, rngs::StdRng};
 use std::collections::HashMap;
 use rand::prelude::IndexedRandom;
+use std::collections::BTreeSet;
+use ordered_float::OrderedFloat;
+
+use rayon::prelude::*;
 
 /// Node of the survival tree
 #[derive(Debug)]
-struct TreeNode {
+#[allow(dead_code)]
+pub struct TreeNode {
     split_feature: Option<usize>,
     split_value: Option<f64>,
     left: Option<Box<TreeNode>>,
@@ -29,6 +33,7 @@ impl TreeNode {
 }
 
 /// RSF configuration
+#[allow(dead_code)]
 pub struct RSFConfig {
     pub n_trees: usize,
     pub min_node_size: usize,
@@ -37,29 +42,68 @@ pub struct RSFConfig {
 }
 
 /// RSF model output
+#[allow(dead_code)]
 pub struct RSFModel {
     pub trees: Vec<TreeNode>,
     pub feature_importance: HashMap<usize, f64>, // column index -> importance
 }
 
-/// Compute log-rank statistic for a split
-fn log_rank_stat(
-    time: &Vec<f64>,
-    status: &Vec<u8>,
-    left_idx: &Vec<usize>,
-    right_idx: &Vec<usize>,
-) -> f64 {
-    // Simplified unweighted log-rank statistic
-    let mut o_l = 0.0;
-    let mut e_l = 0.0;
 
-    for (&idx_l, &idx_r) in left_idx.iter().zip(right_idx.iter()) {
-        // basic: sum events in left minus expected (placeholder, more precise can be done)
-        o_l += status[idx_l] as f64;
-        e_l += (status[idx_l] as f64 + status[idx_r] as f64) / 2.0;
+/// Compute log-rank statistic (Mantel-Haenszel version)
+pub fn log_rank_stat(
+    time: &[f64],
+    status: &[u8],
+    left_idx: &[usize],
+    right_idx: &[usize],
+) -> f64 {
+    assert_eq!(time.len(), status.len());
+
+    // Collect all unique event times
+    let mut event_times: BTreeSet<OrderedFloat<f64>> = BTreeSet::new();
+    for (&t, &s) in time.iter().zip(status.iter()) {
+        if s == 1 {
+            event_times.insert(OrderedFloat(t));
+        }
     }
 
-    if e_l == 0.0 { 0.0 } else { (o_l - e_l).abs() }
+    let mut o_l = 0.0; // observed events left
+    let mut e_l = 0.0; // expected events left
+    let mut v = 0.0;   // variance
+
+
+
+    for &tmp in &event_times {
+        // risk sets at time t
+        let t = f64::from(tmp);
+        let y_l = left_idx.iter().filter(|&&i| time[i] >= t as f64).count() as f64;
+        let y_r = right_idx.iter().filter(|&&i| time[i] >= t as f64 ).count() as f64;
+        let y = y_l + y_r;
+        if y <= 1.0 {
+            continue;
+        }
+
+        // events at time t
+        let d_l = left_idx.iter().filter(|&&i| (time[i] - t).abs() < f64::EPSILON && status[i] == 1).count() as f64;
+        let d_r = right_idx.iter().filter(|&&i| (time[i] - t).abs() < f64::EPSILON && status[i] == 1).count() as f64;
+        let d = d_l + d_r;
+        if d == 0.0 {
+            continue;
+        }
+
+        // expected and variance
+        let e = d * (y_l / y);
+        let v_t = (y_l * y_r * d * (y - d)) / (y * y * (y - 1.0));
+
+        o_l += d_l;
+        e_l += e;
+        v += v_t;
+    }
+
+    if v <= 0.0 {
+        0.0
+    } else {
+        (o_l - e_l).abs() / v.sqrt()
+    }
 }
 
 /// Build a single survival tree recursively allowing NA values
@@ -186,26 +230,31 @@ pub fn fit_rsf(
     let n_features = data.ncols();
     let max_features = config.max_features.unwrap_or((n_features as f64).sqrt() as usize);
 
-    let mut rng = StdRng::seed_from_u64(config.seed);
-    let mut trees = Vec::new();
     let mut feature_importance: HashMap<usize, f64> = HashMap::new();
 
     for f in 0..n_features {
         feature_importance.insert(f, 0.0);
     }
 
-    for _ in 0..config.n_trees {
-        // bootstrap sample
+
+    println!("fitting the survival random forest model");
+
+    // Use rayon's parallel iterator for the trees
+    let trees: Vec<TreeNode> = (0..config.n_trees).into_par_iter().map(|_| {
+        // Each thread gets its own RNG
+        let mut rng = StdRng::seed_from_u64(config.seed);
+
+        // Bootstrap sample
         let indices: Vec<usize> = (0..data.nrows()).collect();
         let sample_indices: Vec<usize> = indices.choose_multiple(&mut rng, data.nrows()).cloned().collect();
 
-        let tree = build_tree(data, time, status, sample_indices, config.min_node_size, max_features, &mut rng);
-        trees.push(tree);
+        // Build the tree
+        build_tree(data, time, status, sample_indices, config.min_node_size, max_features, &mut rng)
+    }).collect();
 
-        // Simple variable importance: count how many times each feature was used
-        for t in &trees {
-            increment_importance(&t, &mut feature_importance);
-        }
+    // Aggregate feature importance after all trees
+    for t in &trees {
+        increment_importance(&t, &mut feature_importance);
     }
 
     RSFModel { trees, feature_importance }

@@ -4,12 +4,11 @@ use ndarray::{Array1, Array2, Axis};
 use ndarray_linalg::Solve; // for linear algebra
 use std::collections::HashMap;
 
-use std::path::Path;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write, Read};
+use std::io::{BufWriter};
 use serde::{Serialize, Deserialize};
 use serde_json;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use ndarray_linalg::Inverse;
 
@@ -60,13 +59,14 @@ impl CoxModel {
         let n_samples = data.nrows();
         let n_features = data.ncols();
         let mut beta = Array1::<f64>::zeros(n_features);
-        let status_f: Array1<f64> = Array1::from(status.iter().map(|&x| x as f64).collect::<Vec<f64>>());
+        let _status_f: Array1<f64> = Array1::from(status.iter().map(|&x| x as f64).collect::<Vec<f64>>());
 
         // Sort ascending by time
         let mut indices: Vec<usize> = (0..n_samples).collect();
         indices.sort_by(|&i, &j| time[i].partial_cmp(&time[j]).unwrap());
 
         let mut final_hessian = Array2::<f64>::zeros((n_features, n_features));
+
         let pb = ProgressBar::new(max_iter as u64);
         pb.set_style(
             ProgressStyle::with_template("{prefix:.bold} [{bar:40.cyan/blue}] {pos}/{len} ({percent}%)")
@@ -170,59 +170,11 @@ impl CoxModel {
             se,
         }
     }
-    /// Predict relative risk (exp(hazard)) and total points for a new dataset
-    pub fn predict(
-        &self,
-        new_data: &Array2<f64>,
-        headers: &[String],
-        points_map: &HashMap<String, i32>,
-        patient_column: &Vec<String>,
-    ) -> Vec<(String, f64, i32)> {
-        let n_rows = new_data.nrows();
-        let mut results = Vec::with_capacity(n_rows);
 
-        // Map feature name -> column index in new_data
-        let feature_indices: Vec<usize> = self.coefficients.iter()
-            .map(|feat| headers.iter()
-                .position(|h| h == feat)
-                .expect(&format!("Feature '{}' missing in headers", feat)))
-            .collect();
-
-        for i in 0..n_rows {
-            // --- Compute linear predictor ---
-            let hazard: f64 = self.coefficients.iter().enumerate()
-                .map(|(j, feat)| {
-                    let beta = self.hr.get(feat).map(|hr| hr.ln()).unwrap();
-                    let x = new_data[[i, feature_indices[j]]];
-                    beta * x
-                })
-                .sum();
-
-            let relative_risk = hazard.exp();
-
-            // --- Compute total points for this patient ---
-            let total_points: i32 = self.coefficients.iter().enumerate()
-                .map(|(j, feat)| {
-                    let x = new_data[[i, feature_indices[j]]];
-                    points_map.get(feat)
-                        .map(|pt| (*pt as f64 * x).round() as i32)
-                        .unwrap()
-                })
-                .sum();
-            let patient_id = if patient_column.len() > i{
-                patient_column[i].clone()
-            }else {
-                i.to_string()
-            };
-            results.push(( patient_id, relative_risk, total_points));
-        }
-
-        results
-    }
     pub fn to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)?;
+        let _ = serde_json::to_writer_pretty(writer, self)?;
         Ok(())
     }
 

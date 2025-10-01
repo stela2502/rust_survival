@@ -111,6 +111,46 @@ Options:
 ```
 
 
+## Test Case
+
+This repo contains a test dataset exoported from the R Survival package: ``tests/data/survival_lung.csv``.
+You can use this data to train a model like this:
+
+```bash
+
+
+## Implementation
+
+This work heavily relied on ChatGPTs input.
+I am not 100\% sure that it performs correctly, but it seams to find reliable connections and can produce somewhat goot results.
+Unfortunately I am no expert in this field either.
+
+**log-rank statistic**.  
+This is the standard version used in survival trees (and RSF). It uses the *Mantel–Haenszel log-rank test* with variance.  
+
+### Formula (per unique event time \(t\))  
+- Let \(Y_{L}(t), Y_{R}(t)\) = number at risk in left/right at \(t\).  
+- Let \(d_{L}(t), d_{R}(t)\) = number of events at \(t\) in left/right.  
+- Total at risk: \(Y(t) = Y_{L}(t) + Y_{R}(t)\).  
+- Total events: \(d(t) = d_{L}(t) + d_{R}(t)\).  
+- Expected events in left:  
+  \[
+  E_L(t) = d(t) \cdot \frac{Y_{L}(t)}{Y(t)}
+  \]  
+- Variance contribution:  
+  \[
+  V(t) = \frac{Y_L(t) Y_R(t) d(t) (Y(t) - d(t))}{Y(t)^2 (Y(t) - 1)}
+  \]  
+
+Then accumulate:  
+
+\[
+Z = \frac{\sum_t (d_L(t) - E_L(t))}{\sqrt{\sum_t V(t)}}
+\]
+
+This \(Z\) is the log-rank statistic.  
+
+
 ## Notes
 
 - The patient column is optional; if not provided, row indices are used as IDs.  

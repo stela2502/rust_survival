@@ -20,16 +20,34 @@ pub struct SummaryStat {
 // Optional: implement Display for pretty printing
 impl fmt::Display for SummaryStat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Sort keys for consistent column order
         let mut keys: Vec<&String> = self.data.keys().collect();
         keys.sort();
-        for k in keys {
-            let (n, haz_mean, haz_var, pts_mean, pts_var) = self.data[k];
-            writeln!(
-                f,
-                "{} -> n: {}, hazard_mean: {:.3e}, hazard_var: {:.3e}, points_mean: {:.2}, points_var: {:.2}",
-                k, n, haz_mean, haz_var, pts_mean, pts_var
-            )?;
+
+        // Prepare each statistic row
+        let mut n_row = vec!["n".to_string()];
+        let mut haz_mean_row = vec!["hazard_mean".to_string()];
+        let mut haz_var_row = vec!["hazard_var".to_string()];
+        let mut pts_mean_row = vec!["points_mean".to_string()];
+        let mut pts_var_row = vec!["points_var".to_string()];
+
+        for k in &keys {
+            let (n, haz_mean, haz_var, pts_mean, pts_var) = self.data[*k];
+            n_row.push(format!("{:.0}", n));
+            haz_mean_row.push(format!("{:.2e}", haz_mean));
+            haz_var_row.push(format!("{:.2e}", haz_var));
+            pts_mean_row.push(format!("{:.2e}", pts_mean));
+            pts_var_row.push(format!("{:.2e}", pts_var));
         }
+
+        // Write each row as tab-separated
+        writeln!(f, "\t{}", keys.into_iter().map(|x| format!("'{}'",x)).collect::<Vec<String>>().join("\t"))?;
+        writeln!(f, "{}", n_row.join("\t"))?;
+        writeln!(f, "{}", haz_mean_row.join("\t"))?;
+        writeln!(f, "{}", haz_var_row.join("\t"))?;
+        writeln!(f, "{}", pts_mean_row.join("\t"))?;
+        writeln!(f, "{}", pts_var_row.join("\t"))?;
+
         Ok(())
     }
 }
@@ -146,6 +164,7 @@ impl Points {
             match survival_data.factors.get( &col) {
                 Some(fact) => {
                     let levels = fact.get_levels();
+                    println!("The recorded levels for factor '{col}': {:?}",levels );
                     let mut haz: Vec<Vec<f64>> = (0..levels.len())
                         .map(|_| Vec::with_capacity(results.len()))
                         .collect();

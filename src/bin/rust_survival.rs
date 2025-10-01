@@ -1,20 +1,16 @@
 // src/main.rs
 
 use clap::Parser;
-use std::collections::HashMap;
 
-mod data;
-mod rsf;
-mod cox;
-mod points;
-
-use rsf::{RSFConfig, fit_rsf};
 use std::collections::HashSet;
-use ndarray:: {Array2, Axis};
-use crate::cox::CoxModel;
-use crate::data::SurvivalData;
-use crate::points::{Points, SummaryStat};
 
+use ndarray:: {Array2, Axis};
+use rust_survival::cox::CoxModel;
+use rust_survival::data::SurvivalData;
+use rust_survival::points::Points;
+use rust_survival::rsf::{RSFConfig, fit_rsf};
+
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[clap(author="Rust Survival CLI", version="0.2", about="RSF -> Cox -> Points")]
@@ -49,9 +45,9 @@ enum Command {
         #[clap(short, long, default_value="100")]
         n_trees: usize,
 
-        /// Minimum node size in RSF trees
-        #[clap(short, long, default_value="5")]
-        min_node_size: usize,
+        /// Path to factor JSON file
+        #[clap(short, long)]
+        factors_file: Option<String>,
 
         /// Number of top variables to select for Cox
         #[clap(long, default_value="5")]
@@ -79,6 +75,10 @@ enum Command {
         /// Path to CSV dataset
         #[clap(short, long)]
         file: String,
+
+        /// Path to factor JSON file
+        #[clap(short, long)]
+        factors_file: Option<String>,
 
         /// Name of the Pateient ID column: default first column
         #[clap(short, long)]
@@ -111,19 +111,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = Command::parse();
 
     match cmd {
-        Command::Train { file, patient_col, time_col, status_col, categorical, exclude_cols, n_trees, min_node_size, top_n, base_hr, delimiter, model, summary } => {
-            run_train(&file, patient_col, &time_col, &status_col, &categorical, exclude_cols, n_trees, min_node_size,
+        Command::Train { file, patient_col, time_col, status_col, categorical, exclude_cols, n_trees, factors_file, top_n, base_hr, delimiter, model, summary } => {
+            run_train(&file, patient_col, &time_col, &status_col, &categorical, exclude_cols, n_trees, factors_file,
                 top_n, base_hr, delimiter.as_bytes()[0], &model, summary )?;
         }
-        Command::Test { file, patient_col, delimiter, categorical, base_hr, model, output } => {
-            run_test(&file, patient_col, delimiter.as_bytes()[0], &categorical, base_hr, &model, output)?;
+        Command::Test { file, patient_col, factors_file, delimiter, categorical, base_hr, model, output } => {
+            run_test(&file, patient_col, factors_file, delimiter.as_bytes()[0], &categorical, base_hr, &model, output)?;
         }
     }
 
     Ok(())
 }
 fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col: &str, categorical: &str, exclude_cols:Option<Vec<String>>, 
-             n_trees: usize, min_node_size: usize, top_n: usize, base_hr: f64,
+             n_trees: usize, factors_file: Option<String>, top_n: usize, base_hr: f64,
              delimiter: u8, model: &str, summary:Option<String> ) -> Result<(), Box<dyn std::error::Error>> {
 //fn main() -> Result<(), Box<dyn std::error::Error>> {
 //    let args = Args::parse();
@@ -134,7 +134,21 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     } else {
         categorical.split(',').map(|s| s.to_string()).collect()
     };
-    
+    let factors_file = match factors_file{
+        Some(f) => f,
+        None => {
+            let mut path = PathBuf::from(file);
+            path.set_extension(""); // remove existing extension
+            path = path.with_file_name(format!("{}_factors.json", path.file_stem().unwrap().to_string_lossy()));
+            format!("{}", path.display())
+        }
+    };
+
+    let mut output = PathBuf::from(file);
+    output.set_extension(""); // remove existing extension
+    output = output.with_file_name(format!("{}_as_the_tool_sees_the_data.csv", output.file_stem().unwrap().to_string_lossy()));
+
+    println!("These columns will be forced to be categorials: {:?}",categorical_cols);
     let delim_byte = delimiter;
 
 
@@ -146,47 +160,47 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     future_cols.insert( status_col.to_string() );
 
 
-    let mut survival_data = SurvivalData::from_file(&file, delim_byte, 10)?;
+    let mut survival_data = SurvivalData::from_file(&file, delim_byte, categorical_cols, &factors_file)?;
+
+    eprintln!("Data summary directly after read:");
+    survival_data.data_summary();
+
     let patient_col = patient_col.unwrap_or_else(|| survival_data.headers[0].clone());
 
     survival_data.filter_na( &time_col );
     let filtered = survival_data.filter_low_var( 1e-20 );
     if filtered > 0 {
-        println!("removed {filtered} columns dure to low varianze of the data");
+        println!("removed {filtered} columns due to low varianze in the data");
     }
     
-
+    eprintln!("Data summary after filter nas:");
+    survival_data.data_summary();
     
     let mut feature_names: Vec<String> = survival_data.filter_features_by_na( 0.10);
     feature_names.retain(|name| !future_cols.contains(name));
 
+    eprintln!("Data summary after filter by na:");
+    survival_data.data_summary();
+
     let min_common = ((feature_names.len() as f64) * 0.7).ceil() as usize;
     survival_data.impute_knn( 3, min_common, true );
 
-    survival_data.filter_all_na_rows();
+    survival_data.filter_all_na_rows(&feature_names);
 
-
-    let headers = &survival_data.headers;
-    let n_rows = survival_data.numeric_data.nrows();
-    let n_cols = headers.len();
-
-    let time_idx = headers.iter()
-        .position(|h| h == &time_col)
-        .ok_or(format!("Time column '{}' not found.\nAvailable column: {:?}", time_col, &survival_data.headers))?;
-
-    let status_idx = headers.iter()
-        .position(|h| h == &status_col)
-        .ok_or(format!("Status column '{}' not found.\nAvailable column: {:?}", status_col, &survival_data.headers))?;
+    eprintln!("Data summary after filter_all_na_rows:");
+    survival_data.data_summary();
     
-
-    let n_features = feature_names.len();
-    let feature_indices: Vec<usize> = feature_names.iter()
-        .filter_map(|name| survival_data.headers.iter().position(|h| h == name))
-        .collect();
+    let n_rows = survival_data.numeric_data.nrows();
 
     // --- get the feature Array2 ---
     let feature_array = survival_data.as_array2(Some(&feature_names));
 
+
+    for j in 0..feature_array.ncols() {
+        let col = feature_array.column(j);
+        let unique_vals: HashSet<String> = col.iter().map(|v| v.to_string() ).collect();
+        eprintln!("Col {}: {} unique values: top 10 {:?}", feature_names[j], unique_vals.len(), unique_vals.iter().take( unique_vals.len().min(10) ).cloned().collect::<Vec<String>>());
+    }
     // --- Extract time and status ---
     let time:  Vec<f64> = survival_data.as_vec_f64( &time_col );
 
@@ -210,11 +224,13 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         }
     }
 
+    eprintln!("Data summary before random forest:");
+    survival_data.data_summary();
 
     // --- Step 1: RSF ---
     let rsf_config = RSFConfig {
         n_trees: n_trees,
-        min_node_size: min_node_size,
+        min_node_size: 20,
         max_features: None,
         seed: 42,
     };
@@ -257,11 +273,12 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         cox_matrix.column_mut(j).assign(&column);
     }
 
+
     // --- Step 2: Cox ---
     println!("fit COX model!");
     let cox_model = CoxModel::fit(&cox_matrix, &time, &status, &top_features, 100, 1e-6);
 
-    cox_model.to_file( model);
+    let _ =cox_model.to_file( model);
     println!("The cox model:{}", cox_model);
 
     println!("Get points_map");
@@ -273,6 +290,8 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     println!("Points model:\n{pts}");
 
     let stats = pts.summary(&survival_data, &cox_model, summary);
+
+
     println!("This should be the stats for this model:\n{stats}");
 
     #[cfg(debug_assertions)]
@@ -286,6 +305,9 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         }
     }
 
+    eprintln!("Data summary before data export:");
+    survival_data.data_summary();
+    survival_data.to_file( output, delim_byte );
     println!("Cox Model saved to file {}", model);
     Ok(())
 }
@@ -293,7 +315,8 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
 
 
 // --- TEST ---
-fn run_test(file: &str, patient_col:Option<String>, delimiter: u8, categorical: &str, base_hr: f64, model_file: &str, output: Option<String>) 
+fn run_test(file: &str, patient_col:Option<String>, factors_file: Option<String>, delimiter: u8, 
+    categorical: &str, base_hr: f64, model_file: &str, output: Option<String>) 
     -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Parse categorical columns ---
@@ -306,16 +329,24 @@ fn run_test(file: &str, patient_col:Option<String>, delimiter: u8, categorical: 
     let delim_byte = delimiter;
 
     // --- Load CSV ---
+
+    let factors_file = match factors_file{
+        Some(f) => f,
+        None => {
+            let mut path = PathBuf::from(file);
+            path.set_extension(""); // remove existing extension
+            path = path.with_file_name(format!("{}_factors.json", path.file_stem().unwrap().to_string_lossy()));
+            format!("{}", path.display())
+        }
+    };
     
-    let mut survival_data = SurvivalData::from_file(&file, delim_byte, 10)?;
+    let mut survival_data = SurvivalData::from_file(&file, delim_byte, categorical_cols, &factors_file)?;
 
     let min_common = ((survival_data.headers.len() as f64) * 0.7).ceil() as usize;
     survival_data.impute_knn( 3, min_common, true );
 
     let patient_col = patient_col.unwrap_or_else(|| survival_data.headers[0].clone());  
-    let headers = &survival_data.headers;
-    let n_rows = survival_data.numeric_data.nrows();
-    let n_cols = headers.len();
+
 
     let cox_model = CoxModel::from_file( model_file ).unwrap();
 

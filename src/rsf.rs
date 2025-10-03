@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use rand::prelude::IndexedRandom;
 use std::collections::BTreeSet;
 use ordered_float::OrderedFloat;
+use rand::prelude::IteratorRandom;
 
 use rayon::prelude::*;
 
@@ -109,12 +110,13 @@ pub fn log_rank_stat(
 /// Build a single survival tree recursively allowing NA values
 fn build_tree(
     data: &Array2<f64>,
-    time: &Vec<f64>,
-    status: &Vec<u8>,
+    time: &[f64],
+    status: &[u8],
     indices: Vec<usize>,
     min_node_size: usize,
     max_features: usize,
     rng: &mut StdRng,
+    feature_importance: &mut HashMap<usize, f64>,
 ) -> TreeNode {
     let n_features = data.ncols();
     let mut node = TreeNode::new(indices.clone());
@@ -124,59 +126,68 @@ fn build_tree(
     }
 
     // Sample features randomly
-    let array_indices: Vec<usize> = (0..n_features).collect();
-    let sampled_features: Vec<usize> = array_indices
+    let sampled_features: Vec<usize> = (0..n_features)
+        .collect::<Vec<_>>()
         .choose_multiple(rng, max_features)
         .cloned()
         .collect();
+
+    //println!("Tree got these features: {:?}", &sampled_features);
 
     let mut best_stat = 0.0;
     let mut best_feature = None;
     let mut best_value = None;
 
-    // Find best split
     for &f in &sampled_features {
-        // Only consider rows where feature is not NaN
+        // Collect non-NA values
         let vals: Vec<f64> = indices.iter()
             .map(|&i| data[[i, f]])
             .filter(|v| !v.is_nan())
             .collect();
 
-        if vals.is_empty() {
-            continue; // Cannot split on this feature
-        }
-
-        let median = median(&vals);
-
-        let left_idx: Vec<usize> = indices.iter()
-            .cloned()
-            .filter(|&i| {
-                let val = data[[i, f]];
-                !val.is_nan() && val <= median
-            })
-            .collect();
-
-        let right_idx: Vec<usize> = indices.iter()
-            .cloned()
-            .filter(|&i| {
-                let val = data[[i, f]];
-                !val.is_nan() && val > median
-            })
-            .collect();
-
-        if left_idx.is_empty() || right_idx.is_empty() {
+        if vals.len() < 2 {
             continue;
         }
 
-        let stat = log_rank_stat(time, status, &left_idx, &right_idx);
-        if stat > best_stat {
-            best_stat = stat;
-            best_feature = Some(f);
-            best_value = Some(median);
+        // Try multiple candidate splits (quantiles)
+        let mut candidates = vec![];
+        let mut sorted_vals = vals.clone();
+        sorted_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for q in [0.25, 0.5, 0.75].iter() {
+            let idx = ((*q * (sorted_vals.len() as f64)) as usize).min(sorted_vals.len() - 1);
+            candidates.push(sorted_vals[idx]);
+        }
+
+        for &split_val in &candidates {
+            let left_idx: Vec<usize> = indices.iter()
+                .cloned()
+                .filter(|&i| {
+                    let val = data[[i, f]];
+                    val <= split_val || val.is_nan() // NA can go left
+                })
+                .collect();
+
+            let right_idx: Vec<usize> = indices.iter()
+                .cloned()
+                .filter(|&i| {
+                    let val = data[[i, f]];
+                    val > split_val || val.is_nan() // NA can also go right
+                })
+                .collect();
+
+            if left_idx.is_empty() || right_idx.is_empty() {
+                continue;
+            }
+
+            let stat = log_rank_stat(time, status, &left_idx, &right_idx);
+            if stat > best_stat {
+                best_stat = stat;
+                best_feature = Some(f);
+                best_value = Some(split_val);
+            }
         }
     }
 
-    // If no valid split, return leaf
     let (f, v) = match (best_feature, best_value) {
         (Some(f), Some(v)) => (f, v),
         _ => return node,
@@ -185,12 +196,15 @@ fn build_tree(
     node.split_feature = Some(f);
     node.split_value = Some(v);
 
-    // Split rows for left/right children
+    // Update feature importance weighted by log-rank statistic
+    *feature_importance.get_mut(&f).unwrap() += best_stat;
+
+    // Split rows for children
     let left_idx: Vec<usize> = indices.iter()
         .cloned()
         .filter(|&i| {
             let val = data[[i, f]];
-            !val.is_nan() && val <= v
+            val <= v || val.is_nan()
         })
         .collect();
 
@@ -198,16 +212,19 @@ fn build_tree(
         .cloned()
         .filter(|&i| {
             let val = data[[i, f]];
-            !val.is_nan() && val > v
+            val > v || val.is_nan()
         })
         .collect();
 
-    node.left = Some(Box::new(build_tree(data, time, status, left_idx, min_node_size, max_features, rng)));
-    node.right = Some(Box::new(build_tree(data, time, status, right_idx, min_node_size, max_features, rng)));
+    node.left = Some(Box::new(build_tree(
+        data, time, status, left_idx, min_node_size, max_features, rng, feature_importance
+    )));
+    node.right = Some(Box::new(build_tree(
+        data, time, status, right_idx, min_node_size, max_features, rng, feature_importance
+    )));
 
     node
 }
-
 /// Median helper
 fn median(vals: &Vec<f64>) -> f64 {
     let mut sorted = vals.clone();
@@ -220,56 +237,108 @@ fn median(vals: &Vec<f64>) -> f64 {
     }
 }
 
-/// Fit a full RSF
+
 pub fn fit_rsf(
     data: &Array2<f64>,
-    time: &Vec<f64>,
-    status: &Vec<u8>,
+    time: &[f64],
+    status: &[u8],
     config: &RSFConfig,
 ) -> RSFModel {
     let n_features = data.ncols();
-    let max_features = config.max_features.unwrap_or((n_features as f64).sqrt() as usize);
 
-    let mut feature_importance: HashMap<usize, f64> = HashMap::new();
+    let max_auto = std::cmp::max(
+        (n_features as f64 * 0.4) as usize,   // 10% of total features
+        (n_features as f64).sqrt() as usize   // sqrt heuristic
+    );
+    let max_features = config.max_features.unwrap_or(max_auto) ;
 
-    for f in 0..n_features {
-        feature_importance.insert(f, 0.0);
-    }
+    println!("Fitting survival random forest with {} trees and {} features per tree...", config.n_trees, max_features);
 
+    // Initialize global feature importance
+    let mut feature_importance: HashMap<usize, f64> = (0..n_features)
+        .map(|f| (f, 0.0))
+        .collect();
 
-    println!("fitting the survival random forest model");
-
-    // Use rayon's parallel iterator for the trees
-    let trees: Vec<TreeNode> = (0..config.n_trees).into_par_iter().map(|_| {
-        // Each thread gets its own RNG
-        let mut rng = StdRng::seed_from_u64(config.seed);
+    // Build trees in parallel
+    let trees: Vec<TreeNode> = (0..config.n_trees).into_par_iter().map(|tree_idx| {
+        // Unique RNG per tree
+        let mut rng = StdRng::seed_from_u64(config.seed + tree_idx as u64);
 
         // Bootstrap sample
         let indices: Vec<usize> = (0..data.nrows()).collect();
         let sample_indices: Vec<usize> = indices.choose_multiple(&mut rng, data.nrows()).cloned().collect();
 
-        // Build the tree
-        build_tree(data, time, status, sample_indices, config.min_node_size, max_features, &mut rng)
-    }).collect();
+        // Local feature importance for this tree
+        let mut tree_importance: HashMap<usize, f64> = (0..n_features).map(|f| (f, 0.0)).collect();
 
-    // Aggregate feature importance after all trees
-    for t in &trees {
-        increment_importance(&t, &mut feature_importance);
-    }
+        // Build the tree
+        let tree = build_tree(
+            data,
+            time,
+            status,
+            sample_indices,
+            config.min_node_size,
+            max_features,
+            &mut rng,
+            &mut tree_importance
+        );
+
+        // Return both tree and its importance
+        (tree, tree_importance)
+    }).collect::<Vec<_>>()
+    .into_iter()
+    .map(|(tree, tree_importance)| {
+        // Merge tree importance into global importance (thread-safe since we are done with parallel)
+        for (k, v) in tree_importance {
+            *feature_importance.get_mut(&k).unwrap() += v;
+        }
+        tree
+    }).collect();
 
     RSFModel { trees, feature_importance }
 }
 
-/// Increment feature importance recursively
-fn increment_importance(node: &TreeNode, importance: &mut HashMap<usize,f64>) {
+/// Increment feature importance recursively using absolute log-rank statistic
+fn increment_importance(
+    node: &TreeNode,
+    data: &Array2<f64>,
+    time: &[f64],
+    status: &[u8],
+    importance: &mut HashMap<usize, f64>,
+    min_node_importance: usize, // minimum samples per child to count
+) {
     if let Some(f) = node.split_feature {
-        *importance.get_mut(&f).unwrap() += 1.0;
+        let split_val = node.split_value.unwrap();
+
+        // Determine left/right indices at this node
+        let left_idx: Vec<usize> = node.indices.iter()
+            .cloned()
+            .filter(|&i| {
+                let val = data[[i, f]];
+                val <= split_val || val.is_nan()
+            })
+            .collect();
+
+        let right_idx: Vec<usize> = node.indices.iter()
+            .cloned()
+            .filter(|&i| {
+                let val = data[[i, f]];
+                val > split_val || val.is_nan()
+            })
+            .collect();
+
+        // Only increment importance if both children have enough samples
+        if left_idx.len() >= min_node_importance && right_idx.len() >= min_node_importance {
+            let stat = log_rank_stat(time, status, &left_idx, &right_idx);
+            *importance.get_mut(&f).unwrap() += stat.abs(); // use absolute value to avoid negative importance
+        }
     }
+
+    // Recurse into children
     if let Some(left) = &node.left {
-        increment_importance(left, importance);
+        increment_importance(left, data, time, status, importance, min_node_importance);
     }
     if let Some(right) = &node.right {
-        increment_importance(right, importance);
+        increment_importance(right, data, time, status, importance, min_node_importance);
     }
 }
-

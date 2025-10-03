@@ -1,18 +1,21 @@
 // src/main.rs
 
-use clap::Parser;
+use clap::{Parser};
+ use clap::builder::ValueParser;
 
 use std::collections::HashSet;
 
 use ndarray:: {Array2, Axis};
 use rust_survival::cox::CoxModel;
-use rust_survival::data::SurvivalData;
+use rust_survival::data::{SurvivalData, Factor};
+
 use rust_survival::points::Points;
 use rust_survival::rsf::{RSFConfig, fit_rsf};
 
 use std::path::PathBuf;
 use std::fs;
 
+use plotters::prelude::*;
 
 #[derive(Parser, Debug)]
 #[clap(author="Rust Survival CLI", version="0.2", about="RSF -> Cox -> Points")]
@@ -34,6 +37,17 @@ enum Command {
         /// Name of event status column (0/1)
         #[clap(short, long)]
         status_col: String,
+
+        /// Split data into in a train and test fraction (default 0.7) 
+        #[clap(long, default_value = "0.7", value_parser = ValueParser::new(|s: &str| {
+            let val: f64 = s.parse().map_err(|_| "Not a valid number")?;
+            if val < 0.1 || val > 0.9 {
+                Err("Value must be between 0.1 and 0.9")
+            } else {
+                Ok(val)
+            }
+        }) )]
+        split: f64,
 
         /// future measurements after diagnosis
         #[clap(short, long, value_delimiter = ',')]
@@ -113,8 +127,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = Command::parse();
 
     match cmd {
-        Command::Train { file, patient_col, time_col, status_col, categorical, exclude_cols, n_trees, factors_file, top_n, base_hr, delimiter, model, summary } => {
-            run_train(&file, patient_col, &time_col, &status_col, &categorical, exclude_cols, n_trees, factors_file,
+        Command::Train { file, patient_col, time_col, status_col, categorical, exclude_cols, split, n_trees, factors_file, top_n, base_hr, delimiter, model, summary } => {
+            run_train(&file, patient_col, &time_col, &status_col, &categorical, exclude_cols, split, n_trees, factors_file,
                 top_n, base_hr, delimiter.as_bytes()[0], &model, summary )?;
         }
         Command::Test { file, patient_col, factors_file, delimiter, categorical, base_hr, model, output } => {
@@ -125,17 +139,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col: &str, categorical: &str, exclude_cols:Option<Vec<String>>, 
-             n_trees: usize, factors_file: Option<String>, top_n: usize, base_hr: f64,
+            split: f64, n_trees: usize, factors_file: Option<String>, top_n: usize, base_hr: f64,
              delimiter: u8, model: &str, summary:Option<String> ) -> Result<(), Box<dyn std::error::Error>> {
 //fn main() -> Result<(), Box<dyn std::error::Error>> {
 //    let args = Args::parse();
 
     // --- Parse categorical columns ---
-    let categorical_cols: HashSet<String> = if categorical.is_empty() {
+    let mut categorical_cols: HashSet<String> = if categorical.is_empty() {
         HashSet::new()
     } else {
         categorical.split(',').map(|s| s.to_string()).collect()
     };
+    categorical_cols.insert( status_col.to_string() );
     let factors_file = match factors_file{
         Some(f) => f,
         None => {
@@ -163,6 +178,8 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
     future_cols.insert( status_col.to_string() );
 
     let mut survival_data = SurvivalData::from_file(&file, delim_byte, categorical_cols, &factors_file)?;
+
+    println!("Data loaded: {} patients {} data columns", survival_data.numeric_data.nrows(), survival_data.numeric_data.ncols() -1 );
 
     let futures:Vec<String> = future_cols.iter().cloned().collect();
     for future_col in futures {
@@ -198,13 +215,17 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
 
     survival_data.filter_all_na_rows(&feature_names);
 
+    let (train_data, test_data) = survival_data.train_test_split( split );
+
+    println!( "Data split into {} train- and {} test-rows", train_data.numeric_data.nrows(), test_data.numeric_data.nrows());
+
     //println!("Data summary after filter_all_na_rows:");
     //survival_data.data_summary();
     
-    let n_rows = survival_data.numeric_data.nrows();
+    let n_rows = train_data.numeric_data.nrows();
 
     // --- get the feature Array2 ---
-    let feature_array = survival_data.as_array2(Some(&feature_names));
+    let feature_array = train_data.as_array2(Some(&feature_names));
 
 
     /*for j in 0..feature_array.ncols() {
@@ -214,16 +235,16 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
         println!("Col {}: {} unique values: top 10 {:?}", feature_names[j], unique_vals.len(), unique_vals.iter().take( unique_vals.len().min(10) ).cloned().collect::<Vec<String>>());
     }*/
     // --- Extract time and status ---
-    let time:  Vec<f64> = survival_data.as_vec_f64( &time_col );
+    let time:  Vec<f64> = train_data.as_vec_f64( &time_col );
 
-    let status_raw: Vec<u8> = survival_data.as_vec_u8( &status_col );
+    let status_raw: Vec<u8> = train_data.as_vec_u8( &status_col );
     let min_val = *status_raw.iter().min().unwrap_or(&0);
     let max_val = *status_raw.iter().max().unwrap_or(&1);
 
     //println!("Status column range: min={} max={}", min_val, max_val);
 
     if min_val != 0 {
-        println!("Warning: status column minimum is {}. Cox model expects 0/1 coding.", min_val);
+        panic!("Error: status column minimum is {} (max ={}). Both RFS and Cox models need 0/1 coding.", min_val, max_val);
     }
 
     // Now you can safely coerce values > 1 to 1
@@ -261,7 +282,7 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
 
     println!("Top RSF variables:");
     for (i, (col_name, imp)) in importance_vec.iter().take(top_n).enumerate() {
-        println!("{}: {} (importance={})", i+1, col_name, imp);
+        println!("{}: {} (importance={:.2})", i+1, col_name, imp);
     }
 
     // --- Select top features and map to column indices in feature_array ---
@@ -301,10 +322,25 @@ fn run_train(file: &str, patient_col:Option<String>, time_col: &str, status_col:
 
     println!("Points model:\n{pts}");
 
-    let stats = pts.summary(&survival_data, &cox_model, summary);
+    let test_stats = pts.summary(&test_data, &cox_model, summary.as_ref() );
+    let train_stats = pts.summary(&train_data, &cox_model, summary.as_ref());
+
+    println!("The results on the training data (n={}):\n{}", train_stats.0, train_data.numeric_data.nrows());
+    println!("And here the results on the test data (n={}):\n{}", test_stats.0,  test_data.numeric_data.nrows());
+
+    let mut hazard_file = PathBuf::from(model);
+    hazard_file.set_extension(""); // remove existing extension
+    hazard_file = hazard_file.with_file_name(format!("{}_hazard_values.svg", hazard_file.file_stem().unwrap().to_string_lossy()));
+
+    Points::plot_raw_summary( &test_stats.1, Some(&train_stats.1), &Factor::new("unknown", false), "raw Hazard Values for the training session", &hazard_file);
 
 
-    println!("This should be the stats for this model:\n{stats}");
+    let mut points_file = PathBuf::from(model);
+    points_file.set_extension(""); // remove existing extension
+    points_file = points_file.with_file_name(format!("{}_points_values.svg", points_file.file_stem().unwrap().to_string_lossy()));
+
+    Points::plot_raw_summary( &test_stats.2, Some(&train_stats.2), &Factor::new("unknown", false),"raw Points Values for the training session", &points_file);
+
 
     #[cfg(debug_assertions)]
     {

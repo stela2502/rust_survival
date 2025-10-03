@@ -3,3 +3,5 @@
 TCGA_GBM_subset.csv
 /GDCdata/
 ~.lock*
+*.Rout
+*.svg

@@ -1,5 +1,5 @@
 use clap::Parser;
-use rust_survival::data::{SurvivalData};
+use rust_survival::data::{SurvivalData, Factor};
 
 /// Modify numeric mappings in factor JSON files
 #[derive(Parser, Debug)]
@@ -37,10 +37,15 @@ fn main() -> anyhow::Result<()> {
     } else {
         args.levels.split(',').map(|s| s.to_string()).collect()
     };
+    let optional_levels = if levels_to_change.is_empty() {
+        None
+    }else {
+        Some(levels_to_change.as_slice())
+    };
     // Parse numeric values as integers
     let numeric_values: Vec<f64> = args.numeric
         .split(',')
-        .map(|v| v.parse::<i64>().expect("Invalid numeric value: must be an integer") as f64)
+        .map(|v| v.parse::<f64>().expect("Invalid numeric value") as f64)
         .collect();
 
     for (col_name, factor) in data.factors.iter_mut() {
@@ -50,19 +55,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         if matches_factor {
-            if !levels_to_change.is_empty() {
-                // Modify only the specified levels
-                for (lvl, &val) in levels_to_change.iter().zip(numeric_values.iter()) {
-                    if let Some(_idx) = factor.levels.iter().position(|x| x == lvl) {
-                        factor.level_to_index.insert(lvl.clone(), val);
-                    }
-                }
-            } else if args.overwrite {
-                // Overwrite all levels in order
-                for (lvl, &val) in factor.levels.iter().zip(numeric_values.iter()) {
-                    factor.level_to_index.insert(lvl.clone(), val);
-                }
-            }
+            factor.modify_levels( &numeric_values, optional_levels ).unwrap();
         }
     }
 

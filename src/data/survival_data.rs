@@ -1,269 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path};
 use csv::{ WriterBuilder};
-use ndarray::{Array2, s};
+use ndarray::{Array2, Axis, s};
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::fs::File;
 use std::io::{BufWriter, BufReader};
 use std::fmt;
-
-#[derive(Debug, Clone)]
-pub struct Factor {
-    column_name: String,
-    indices: Vec<f64>,                // 0.0..n-1.0 for levels, NaN for missing
-    pub levels: Vec<String>,              // level labels
-    pub level_to_index: HashMap<String, f64>, // fast lookup
-    matching:Option<Vec<String>>, // this could match to multiple column names. Like SNP or something
-    one_hot: bool, // NEW
-}
-
-
-impl fmt::Display for Factor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Factor '{}':", self.column_name)?;
-        writeln!(f, "  One-hot: {}", self.one_hot)?;
-        writeln!(f, "  Levels: {:?}", self.levels)?;
-        writeln!(f, "  Matching: {:?}", self.matching)?;
-        writeln!(f, "  All columns: {:?}", self.all_column_names())
-    }
-}
-
-/// Only save labels in JSON
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FactorJson {
-    column: String,
-    levels: Vec<String>,
-    numeric: Option<Vec<f64>>,
-    matching:Option<Vec<String>>, 
-    one_hot: bool, // NEW
-}
-
-
-impl Factor {
-    
-    /// Create a new Factor with a column name and one_hot flag
-    pub fn new(column_name: &str, one_hot: bool) -> Self {
-        Factor {
-            column_name: column_name.to_string(),
-            indices: Vec::new(),
-            levels: Vec::new(),
-            level_to_index: HashMap::new(),
-            matching: None,
-            one_hot,
-        }
-    }
-
-    pub fn with_empty(fill: usize, column_name:&str) -> Self {
-        Self {
-            column_name: column_name.to_string(),
-            indices: vec![f64::NAN; fill],
-            levels: Vec::new(),
-            level_to_index: HashMap::new(),
-            matching:None,
-            one_hot: false, // NEW
-        }
-    }
-    pub fn extra_columns(&self) -> usize {
-        if self.one_hot {
-            self.levels.len()
-        }else {
-            0
-        }
-    }
-
-    /// returns all one_hot column names or the original colum, name only
-    pub fn all_column_names(&self ) -> Vec<String> {
-        if self.one_hot {
-             self
-                .levels
-                .iter()
-                .map(|lvl| self.build_one_hot_column(lvl)).collect()
-        }else {
-            //vec![]
-            vec![ self.column_name.to_string() ]
-        }
-    }
-
-    fn build_one_hot_column( &self, value:&str) -> String {
-        if self.one_hot {
-            format!("{}_{}", self.column_name, value)
-        }else {
-            self.column_name.clone()
-        }
-        
-    }
-
-    /// Push a value for this factor.
-    /// Returns:
-    /// - f64: the numeric index for this value
-    /// - String the column name the value should be added to
-    /// - Option<Vec<String>>: all one-hot columns if one-hot
-    pub fn push(&mut self, value: &str) -> (f64, String,  Option<Vec<String>>) {
-        let trimmed = value.trim();
-
-        // Handle one-hot encoding
-        let ret = if self.one_hot {
-            //println!("See we have a one_hot here! {} - trimmed {}", self.column_name, trimmed);
-            let idx = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NA") {
-                f64::NAN
-            }else {
-                1.0
-            };
-            // all other levels become zero columns
-            let zero_cols = self.all_column_names( );
-            let zero_cols_option = if zero_cols.len() == 1 { None } else { Some(zero_cols) };
-            (idx, self.build_one_hot_column( trimmed ) , zero_cols_option)
-        } else {
-            let idx = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("NA") {
-                f64::NAN
-            }else {
-                // Determine numeric index
-                if let Some(&i) = self.level_to_index.get(trimmed) {
-                    i
-                } else {
-                    let new_idx = self.levels.len() as f64;
-                    self.levels.push(trimmed.to_string());
-                    self.level_to_index.insert(trimmed.to_string(), new_idx);
-                    new_idx
-                }
-            };
-            (idx, self.column_name.to_string() , None)
-        };
-        //println!("   We '{}' return a value of {}", ret.1, ret.0);
-        ret
-    }
-
-    pub fn push_missing(&mut self) {
-        self.indices.push(f64::NAN);
-    }
-
-    pub fn get_value(&self, i: usize) -> String {
-        match self.indices.get(i) {
-            Some(&idx) if idx.is_nan() => "NA".to_string(),
-            Some(&idx) => self.levels.get(idx as usize)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string()),
-            None => "NA".to_string(),
-        }
-    }
-
-    pub fn get_f64( &self, trimmed: &str ) ->f64  {
-       *self.level_to_index.get(trimmed).unwrap_or( &f64::NAN )
-    }
-
-    pub fn get_levels(&self) -> Vec<String> {
-        self.levels.clone()
-    }
-
-    /// Create Factor from FactorDef
-    pub fn from_def(def: &FactorJson) -> Self {
-        let level_to_index: std::collections::HashMap<String, f64> = match &def.numeric {
-            Some( numbers ) => {
-                def.levels
-                .iter()
-                .cloned()
-                .zip(numbers.iter().cloned())
-                .collect()
-            },
-            None => {
-                def.levels.iter()
-                .enumerate()
-                .map(|(i, s)| (s.clone(),i  as f64))
-                .collect()
-            }
-        };
-
-        Factor {
-            column_name: def.column.to_string(),
-            indices: Vec::new(),
-            levels: def.levels.clone(),
-            level_to_index,
-            matching: def.matching.clone(),
-            one_hot: def.one_hot,
-        }
-    }
-
-    /// Convert Factor into JSON representation
-    pub fn as_json(&self, column: &str) -> FactorJson {
-        let numeric: Vec<f64> = self.levels
-            .iter()
-            .map(|name| {
-                self.level_to_index.get(name).copied().unwrap_or_else(|| {
-                    panic!(
-                        "Factor::as_json error: level '{}' not found in mapping for column '{}'",
-                        name, column
-                    )
-                })
-            })
-            .collect();
-
-        FactorJson {
-            column: self.column_name.to_string(),
-            levels: self.levels.clone(),
-            numeric: Some(numeric),
-            matching: self.matching.clone(),
-            one_hot: self.one_hot,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_push_one_hot() {
-        let mut f = Factor::with_empty(0, "Color");
-        assert_eq!( f.push("Red"), (0.0,"Color".to_string(), None), "new factor Red gets 0");
-        assert_eq!( f.push("Blue"), (1.0,"Color".to_string(), None), "new factor Blue gets 1");
-        let (idx, col, opt) = f.push("NA");
-        assert!(idx.is_nan(), "new factor NA should be NaN");
-        assert_eq!(col, "Color");
-        assert_eq!(opt, None);
-        f.one_hot = true;
-
-        // Push first value "Red"
-        let (idx, col_to_add, all_cols) = f.push("Red");
-        assert_eq!(idx, 1.0);
-        assert_eq!(col_to_add, "Color_Red");
-        assert_eq!(all_cols.unwrap(), vec!["Color_Red".to_string(),"Color_Blue".to_string() ]);
-
-        // Push another value "Blue"
-        let (idx, col_to_add, all_cols) = f.push("Blue");
-        assert_eq!(idx, 1.0);
-        assert_eq!(col_to_add, "Color_Blue");
-        assert_eq!(all_cols.unwrap(), vec!["Color_Red".to_string(),"Color_Blue".to_string() ]);
-
-
-        // Now push a missing value
-        let (idx, col_to_add, all_cols) = f.push("NA");
-        assert!(idx.is_nan());
-        assert_eq!(col_to_add, "Color_NA");
-        assert_eq!(all_cols.unwrap(), vec!["Color_Red".to_string(),"Color_Blue".to_string() ]);
-    }
-
-    #[test]
-    fn test_push_categorical_indexed() {
-
-
-        let mut f = Factor::with_empty(0, "Color");
-        assert_eq!( f.push("Red"), (0.0,"Color".to_string(), None), "new factor Red gets 0");
-        assert_eq!( f.push("Blue"), (1.0,"Color".to_string(), None), "new factor Blue gets 1");
-        let (idx, col, opt) = f.push("NA");
-        assert!(idx.is_nan(), "new factor NA should be NaN");
-        assert_eq!(col, "Color");
-        assert_eq!(opt, None);
-
-        assert_eq!( f.push("Red"), (0.0,"Color".to_string(), None), "2# new factor Red gets 0");
-        assert_eq!( f.push("Blue"), (1.0,"Color".to_string(), None), "2# new factor Blue gets 1");
-        let (idx, col, opt) = f.push("NA");
-        assert!(idx.is_nan(), "2# new factor NA should be NaN");
-        assert_eq!(col, "Color");
-        assert_eq!(opt, None);
-    }
-}
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use crate::data::{Factor, factor::FactorJson};
 
 
 #[derive(Debug, Clone)]
@@ -362,7 +109,7 @@ impl SurvivalData {
                 // Insert a Factor for this categorical column if it does not exist yet
                 println!("Forcing header {header} to be a factor");
                 ret.factors.entry(header.clone())
-                .or_insert_with(|| Factor::with_empty(0, &header));
+                .or_insert_with(|| Factor::new( &header, false));
             }
         }
         ret.headers = headers.clone();
@@ -427,7 +174,7 @@ impl SurvivalData {
                         }
                         let factor = ret.factors
                         .entry(headers[i+expanded].clone())
-                        .or_insert_with(|| Factor::with_empty(raw_rows.len(), &headers[i+expanded]) );
+                        .or_insert_with(|| Factor::new(&headers[i+expanded], false) );
                         let (idx, col_to_add, all_cols)= factor.push(trimmed);
                         let alt = if idx.is_nan() { f64::NAN }else { 0.0 };
                         match all_cols {
@@ -514,17 +261,41 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
         Ok(ret)
     }
 
+    /// Split into train and test by a fraction (e.g. 0.7 = 70% train, 30% test).
+    pub fn train_test_split(&self, train_fraction: f64) -> (SurvivalData, SurvivalData) {
+        assert!(train_fraction > 0.0 && train_fraction < 1.0);
+
+        let n_rows = self.numeric_data.nrows();
+        let mut indices: Vec<usize> = (0..n_rows).collect();
+        let mut rng = thread_rng();
+        indices.shuffle(&mut rng);
+
+        let train_size = (n_rows as f64 * train_fraction).round() as usize;
+
+        let train_idx = &indices[..train_size];
+        let test_idx = &indices[train_size..];
+
+        let train_data = self.numeric_data.select(Axis(0), train_idx);
+        let test_data = self.numeric_data.select(Axis(0), test_idx);
+
+        let make_subset = |data: Array2<f64>| SurvivalData {
+            headers: self.headers.clone(),
+            numeric_data: data,
+            factors: self.factors.clone(),
+            exclude: self.exclude.clone(),
+        };
+
+        (make_subset(train_data), make_subset(test_data))
+    }
+
     fn header_error( &self, i: usize, expanded: usize) -> String {
         let mut parts:Vec<String> = Vec::with_capacity( self.factors.len() + 1 );
         for factor in self.factors.values() {
             parts.push( format!("{}", factor ) );
         }
-        parts.push(format!("Headers have the length {} and we would want id {}:\n{}", self.headers.len(), i+expanded, self.headers
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, h)| format!("{}: {}", idx, h))
-                            .collect::<Vec<_>>()
-                            .join("\n") ) );
+        parts.push(format!("Headers have the length {} and we would want id {}:\n{}", 
+            self.headers.len(), i+expanded, 
+            self.headers(20).join("\n") ) );
 
         parts.join("\n")
     }
@@ -564,13 +335,18 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
     pub fn filter_all_na_rows(&mut self, usable:&Vec<String>) {
         let n_rows = self.numeric_data.nrows();
         let n_cols = self.numeric_data.ncols();
+        println!("filter_all_na_rows got {} rows and {} columns and checks {} of these columns for na's", 
+            n_rows, n_cols, usable.len() );
 
         // Build a lookup of usable column indices
         let usable_indices: Vec<usize> = usable
             .iter()
             .filter_map(|col| self.headers.iter().position(|h| h == col))
             .collect();
-
+        if usable_indices.len() == n_rows {
+            println!("No rows containing NA values found");
+            return
+        }
         // Determine which rows to keep
         let keep_rows: Vec<usize> = (0..n_rows)
             .filter(|&i| {
@@ -579,7 +355,10 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
                     .any(|&j| self.numeric_data[[i, j]].is_nan())
             })
             .collect();
-
+        if keep_rows.len() == n_rows {
+            println!("No na's found in the {} columns", usable.len() );
+            return
+        }
 
         // Rebuild numeric_data with only the kept rows
         let mut filtered = Array2::<f64>::zeros((keep_rows.len(), n_cols));
@@ -591,14 +370,19 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
         self.numeric_data = filtered;
 
         // Filter factors: keep only entries for kept rows
-        for factor in self.factors.values_mut() {
-            let mut new_indices = Vec::with_capacity(keep_rows.len());
-            for &old_i in &keep_rows {
-                let v = *factor.indices.get(old_i).unwrap_or(&f64::NAN);
-                new_indices.push(v);
+        let mut new_factors = HashMap::<String,Factor>::new();
+
+        for factor in self.factors.values() {
+            if let Some(col_id) = self.headers.iter().position(|h| h == &factor.column_name) {
+                new_factors.insert( 
+                    factor.column_name.clone(), 
+                    factor.subset( &self.numeric_data, col_id ) 
+                );
+            }else {
+                panic!("a previousely known column has vanished?! {}", factor.column_name );
             }
-            factor.indices = new_indices;
         }
+        self.factors = new_factors;
 
         println!(
             "Filtered out {} rows containing NaNs. Remaining rows: {}",
@@ -747,15 +531,6 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
         }
         self.numeric_data = filtered;
 
-        // Filter factors: keep only entries for kept rows
-        for factor in self.factors.values_mut() {
-            let mut new_indices = Vec::with_capacity(keep_rows.len());
-            for &old_i in &keep_rows {
-                let v = *factor.indices.get(old_i).unwrap_or(&f64::NAN);
-                new_indices.push(v);
-            }
-            factor.indices = new_indices;
-        }
     }
 
     /// Remove columns with variance below `threshold`
@@ -870,14 +645,17 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
     /// Return a single column as Vec<f64>
     pub fn as_vec_f64(&self, column: &str) -> Vec<f64> {
         let idx = self.headers.iter().position(|h| h == column)
-            .unwrap_or_else(|| panic!("Column '{}' not found in the dataset; all columns: \n{}", column, self.headers.join("\n")));
+            .unwrap_or_else(|| panic!("Column '{}' not found in the dataset; all columns: \n{}", 
+                column, self.headers(20).join("\n")));
         self.numeric_data.column(idx).to_vec()
     }
 
     /// Return a single column as Vec<u8>
     pub fn as_vec_u8(&self, column: &str) -> Vec<u8> {
         let idx = self.headers.iter().position(|h| h == column)
-            .unwrap_or_else(|| panic!("Column '{}' not found in the dataset; all columns: \n{}", column, self.headers.join("\n")));
+            .unwrap_or_else(|| 
+                panic!("Column '{}' not found in the dataset; all columns: \n{}\nColumn '{}' not found in the dataset", 
+                    column, self.headers(20).join("\n") ,column ));
         self.numeric_data.column(idx).iter().map(|&v| v as u8).collect()
     }
 
@@ -892,13 +670,21 @@ Notes: This factor is categorical with no inherent order, so it’s a good candi
             let fact = self.factors.get( column ).unwrap();
             //println!("I will use the factor {fact:?} to translate the columns ids like {:?}",  self.numeric_data.column(idx).iter().take(10).collect::<Vec<_>>() );
             Some( self.numeric_data.column(idx).iter()
-                    .map(|&v| fact.get_value( v as usize) )  // translate f64 -> String
+                    .map(|&v| fact.get_string( v ) )
                     .collect())
         }else {
             //println!("Column '{column}' is no Factor here\n{:?}\nFactors I have: \n{:?}\n", self.headers, self.factors.keys() );
             None
         }
         
+    }
+
+    pub fn headers(&self, max: usize) -> Vec<&str> {
+        self.headers
+            .iter()                      // borrow each String
+            .take(self.headers.len().min(max))  // take at most `max`
+            .map(|s| s.as_str())         // convert &String → &str
+            .collect()                   // collect into Vec<&str>
     }
 
     /// Write data (numeric + factor) to CSV
@@ -958,12 +744,10 @@ mod tests_one_hot_factors {
     use super::*;
     use std::fs;
     use std::collections::HashSet;
-    use tempfile::tempdir;
 
     #[test]
     fn test_save_and_load_factors() -> Result<(), Box<dyn std::error::Error>> {
-        // --- Temp directory ---
-        let dir =  PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let factors_path = dir.as_path().join("factors.json");
 
         // --- Create Factors ---
@@ -984,48 +768,27 @@ mod tests_one_hot_factors {
         data.factors.insert("Color".to_string(), color);
         data.factors.insert("Number".to_string(), number);
 
-        // --- Save factors to JSON ---
+        // --- Save to JSON ---
         data.save_factors(&factors_path)?;
 
-        // --- Read JSON file back ---
+        // --- Load from JSON ---
         data.factors = HashMap::new();
-        let json_content = fs::read_to_string(&factors_path)?;
-        println!("Saved JSON:\n{}", json_content);
         data.load_factors(&factors_path)?;
+        let loaded_factors = &data.factors;
 
-        // --- Deserialize to check ---
-        let loaded_factors = data.factors;
+        // Check factors exist
+        assert!(loaded_factors.contains_key("Color"));
+        assert!(loaded_factors.contains_key("Number"));
 
-        // 1️⃣ Check that both factors exist
-        assert!(loaded_factors.contains_key("Color"), "Color factor exists after load");
-        assert!(loaded_factors.contains_key("Number"), "Number factor exists after load");
-
-        // 2️⃣ Check levels for Color
+        // Check levels
         let color = loaded_factors.get("Color").unwrap();
-        assert_eq!(color.levels, vec!["Red", "Blue", "Green"], "Color levels match");
-        assert_eq!(color.one_hot, true, "Color one_hot flag preserved");
+        assert_eq!(color.get_levels(), vec!["Red", "Blue", "Green"]);
+        assert!(color.one_hot);
 
-        // 3️⃣ Check levels for Number
         let number = loaded_factors.get("Number").unwrap();
-        assert_eq!(number.levels, vec!["1", "2", "3"], "Number levels match");
-        assert_eq!(number.one_hot, true, "Number one_hot flag preserved");
+        assert_eq!(number.get_levels(), vec!["1", "2", "3"]);
+        assert!(number.one_hot);
 
-        // 4️⃣ Check level_to_index maps
-        for (idx, lvl) in color.levels.iter().enumerate() {
-            let mapped_idx = color.level_to_index.get(lvl).unwrap();
-            assert_eq!(*mapped_idx, idx as f64, "Color level_to_index correct for {}", lvl);
-        }
-
-        for (idx, lvl) in number.levels.iter().enumerate() {
-            let mapped_idx = number.level_to_index.get(lvl).unwrap();
-            assert_eq!(*mapped_idx, idx as f64, "Number level_to_index correct for {}", lvl);
-        }
-
-        // 5️⃣ Check that indices vector is empty (not yet populated)
-        assert!(color.indices.is_empty(), "Color indices empty after load");
-        assert!(number.indices.is_empty(), "Number indices empty after load");
-
-        assert_eq!( color.all_column_names(), vec![ "Color_Red".to_string(), "Color_Blue".to_string(),"Color_Green".to_string()] ,"Color all headers");
         Ok(())
     }
 }
@@ -1171,6 +934,67 @@ Na,Na
                 assert_eq!(val_2, exp_2, "Number_2 mismatch at row {}/{}: {} != {} all data {}", number_2_idx, row, val_2, exp_2,data.numeric_data);
                 assert_eq!(val_3, exp_3, "Number_3 mismatch at row {}/{}: {} != {} all data {}", number_3_idx, row, val_3, exp_3,data.numeric_data);
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_survivaldata_train_test_split_unique() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::tempdir;
+
+        // --- Prepare temporary directory and files ---
+        let dir = tempdir()?;
+        let csv_path = dir.path().join("unique_data.csv");
+        let factors_path = dir.path().join("unique_factors.json");
+
+        // --- Generate CSV data with 10 rows, 10 columns, unique values 1..100 ---
+        let nrows = 10;
+        let ncols = 10;
+        let mut csv_content = String::new();
+        // header
+        csv_content.push_str(&(0..ncols).map(|i| format!("Col{}", i)).collect::<Vec<_>>().join(","));
+        csv_content.push('\n');
+        // data
+        let mut val = 1;
+        for _ in 0..nrows {
+            let row = (0..ncols).map(|_| {
+                let s = val.to_string();
+                val += 1;
+                s
+            }).collect::<Vec<_>>().join(",");
+            csv_content.push_str(&row);
+            csv_content.push('\n');
+        }
+
+        // write CSV
+        let mut f = File::create(&csv_path)?;
+        f.write_all(csv_content.as_bytes())?;
+
+        // --- Create empty factors JSON ---
+        let mut f_factors = File::create(&factors_path)?;
+        f_factors.write_all(b"[]")?;
+
+        // --- Load data ---
+        let categorical_cols = HashSet::<String>::new();
+        let data = SurvivalData::from_file(&csv_path, b',', categorical_cols, &factors_path)?;
+
+        // --- Split ---
+        let (train, test) = data.train_test_split(0.7);
+
+        // --- Assertions ---
+        assert_eq!(train.numeric_data.nrows() + test.numeric_data.nrows(), nrows, "Row counts must add up");
+        assert_eq!(train.headers, data.headers);
+        assert_eq!(test.headers, data.headers);
+
+        // Check that all rows are unique across train and test
+        let train_rows: Vec<Vec<f64>> = train.numeric_data.rows().into_iter().map(|r| r.to_vec()).collect();
+        let test_rows: Vec<Vec<f64>> = test.numeric_data.rows().into_iter().map(|r| r.to_vec()).collect();
+
+        for row in &train_rows {
+            assert!(!test_rows.contains(row), "Row appeared in both train and test!");
         }
 
         Ok(())

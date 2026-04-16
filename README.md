@@ -150,9 +150,6 @@ Likely close to everything apart from data loading and factorization is up for c
 This repo contains a test dataset exoported from the R Survival package: ``tests/data/survival_lung.csv``.
 You can use this data to train a model like this:
 
-```bash
-
-
 ## Implementation
 
 This work heavily relied on ChatGPTs input.
@@ -192,7 +189,6 @@ This \(Z\) is the log-rank statistic.
 - The `--exclude-cols` option allows you to exclude features measured **after diagnosis**.  
 - Summary statistics can be generated for any factor column using `--summary`.  
 
----
 
 For the latest updates, visit the GitHub repository:  
 [https://github.com/stela2502/rust_survival/](https://github.com/stela2502/rust_survival/)
